@@ -12,6 +12,8 @@ const serverEl = $('server');
 const engineEl = $('engine');
 const apiKeyEl = $('apikey');
 const serverField = $('server-field');
+const tokenField = $('token-field');
+const tokenEl = $('server-token');
 
 let activeTab = null;
 let running = false;
@@ -42,6 +44,7 @@ async function checkServer() {
 function syncEngineFields() {
   const browser = engineEl.value === 'browser';
   serverField.hidden = browser;
+  tokenField.hidden = browser;
 }
 
 function setRunning(on) {
@@ -56,6 +59,7 @@ async function pollState() {
   const st = (await chrome.storage.session.get('jlsStatus')).jlsStatus || {};
   if (!st.phase) return;
   if (st.phase === 'error') {
+    setRunning(false);
     setStatus(st.message || '出错了', true);
     setDot('bad');
   } else if (st.phase === 'connected') {
@@ -65,6 +69,7 @@ async function pollState() {
     setStatus(st.message || '正在采集声音', false);
     setDot('busy');
   } else if (st.phase === 'idle') {
+    setRunning(false);
     setStatus(st.message || '已停止', false);
     setDot(null);
   } else if (st.phase === 'starting') {
@@ -78,17 +83,18 @@ async function init() {
   activeTab = tab || null;
   $('tab-title').textContent = tab ? (tab.title || tab.url || '当前标签页') : '没有可用标签页';
 
-  const store = await chrome.storage.local.get(['jlsTarget', 'jlsServer', 'jlsEngine', 'jlsApiKey']);
+  const store = await chrome.storage.local.get(['jlsTarget', 'jlsServer', 'jlsEngine', 'jlsApiKey', 'jlsServerToken']);
   targetEl.value = store.jlsTarget || 'zh';
   serverEl.value = store.jlsServer || DEFAULT_SERVER;
   engineEl.value = store.jlsEngine || 'browser';
   apiKeyEl.value = store.jlsApiKey || '';
+  tokenEl.value = store.jlsServerToken || '';
   syncEngineFields();
 
   const st = await chrome.runtime.sendMessage({ type: 'jls:query' }).catch(() => null);
   if (st && st.running) setRunning(true);
 
-  const health = await checkServer();
+  const health = engineEl.value === 'browser' ? true : await checkServer();
   if (health) setDot(running ? 'ok' : null);
   else {
     setDot('bad');
@@ -104,6 +110,7 @@ async function init() {
     syncEngineFields();
   });
   apiKeyEl.addEventListener('change', () => chrome.storage.local.set({ jlsApiKey: apiKeyEl.value.trim() }));
+  tokenEl.addEventListener('change', () => chrome.storage.local.set({ jlsServerToken: tokenEl.value.trim() }));
 }
 
 btnStart.addEventListener('click', async () => {
@@ -116,7 +123,7 @@ btnStart.addEventListener('click', async () => {
     setStatus('浏览器内部页面无法采集，请换一个普通网页', true);
     return;
   }
-  const health = await checkServer();
+  const health = engineEl.value === 'browser' ? true : await checkServer();
   if (!health) {
     setDot('bad');
     setStatus('字幕服务没有运行：先执行 .\\run.ps1', true);
@@ -126,6 +133,10 @@ btnStart.addEventListener('click', async () => {
   if (engineEl.value === 'browser' && !apiKeyEl.value.trim()) {
     setDot('bad');
     setStatus('浏览器内模式需要 DeepSeek Key（翻译用）', true);
+    return;
+  }
+  if (engineEl.value === 'server' && !tokenEl.value.trim()) {
+    setStatus('请填写服务启动时显示的访问令牌', true);
     return;
   }
   chrome.storage.local.set({ jlsEngine: engineEl.value, jlsApiKey: apiKeyEl.value.trim(), jlsTarget: targetEl.value });
@@ -145,12 +156,14 @@ btnStart.addEventListener('click', async () => {
       serverUrl: serverEl.value.trim() || DEFAULT_SERVER,
       engine: engineEl.value,
       apiKey: apiKeyEl.value.trim(),
+      serverToken: tokenEl.value.trim(),
     });
     if (!r || !r.ok) throw new Error((r && r.error) || '启动失败');
     setRunning(true);
     setStatus('已开始，字幕会出现在网页底部');
     setDot('ok');
   } catch (e) {
+    await chrome.runtime.sendMessage({ type: 'jls:stop' }).catch(() => {});
     setRunning(false);
     setDot('bad');
     setStatus(String(e.message || e), true);

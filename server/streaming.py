@@ -18,6 +18,7 @@ import numpy as np
 from .asr import SAMPLE_RATE, SileroVad, SenseVoiceRecognizer
 from .text import looks_complete, normalize_ja, stable_prefix
 from .translate import TranslationPipeline
+from .security import MAX_BUFFERED_BYTES, MAX_FRAME_BYTES
 
 VAD_FRAME = 512
 PARTIAL_INTERVAL = 0.6
@@ -76,7 +77,8 @@ class StreamSession:
         self.vad = SileroVad()
         self.stats = Stats()
 
-        self._q: asyncio.Queue[np.ndarray | None] = asyncio.Queue(maxsize=600)
+        self._q: asyncio.Queue[np.ndarray | None] = asyncio.Queue(maxsize=64)
+        self._queued_bytes = 0
         self._chunks: list[np.ndarray] = []
         self._chunk_starts: list[int] = []
         self._total = 0
@@ -105,36 +107,32 @@ class StreamSession:
         if not np.issubdtype(pcm.dtype, np.floating):
             pcm = pcm.astype(np.float32) / 32768.0
         pcm = np.ascontiguousarray(pcm, dtype=np.float32)
+        if pcm.ndim != 1 or pcm.nbytes > MAX_FRAME_BYTES or not np.isfinite(pcm).all():
+            raise ValueError('Invalid or oversized PCM frame')
+        if not pcm.size:
+            return
+        if self._queued_bytes + pcm.nbytes > MAX_BUFFERED_BYTES or self._q.full():
+            raise ValueError('Audio buffer limit exceeded; slow down')
         self.stats.chunks += 1
         self.stats.audio_seconds += len(pcm) / SAMPLE_RATE
-        try:
-            self._q.put_nowait(pcm)
-        except asyncio.QueueFull:
-            try:
-                self._q.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-            try:
-                self._q.put_nowait(pcm)
-            except asyncio.QueueFull:
-                pass
+        self._q.put_nowait(pcm)
+        self._queued_bytes += pcm.nbytes
 
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        try:
-            self._q.put_nowait(None)
-        except asyncio.QueueFull:
-            pass
-        if self._task:
-            try:
-                await asyncio.wait_for(self._task, timeout=8)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                self._task.cancel()
-        if self._translate_task and not self._translate_task.done():
-            self._translate_task.cancel()
-        await self.translator.tr.close()
+        tasks = [task for task in (self._task, self._translate_task) if task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        while not self._q.empty():
+            self._q.get_nowait()
+        self._queued_bytes = 0
+        self._chunks.clear()
+        self._chunk_starts.clear()
+        self._vad_pending = np.zeros(0, dtype=np.float32)
+        # The translator belongs to the application, not this connection.
 
     # ---------------------------------------------------------------- audio ring
     def _append(self, pcm: np.ndarray) -> None:
@@ -160,6 +158,8 @@ class StreamSession:
         return np.concatenate(parts)
 
     def _emit(self, event: dict) -> None:
+        if self._closed:
+            return
         try:
             self.on_event(event)
         except Exception:  # noqa: BLE001 - never break audio processing on UI errors
@@ -304,6 +304,7 @@ class StreamSession:
             if item is None:
                 break
             if item is not _TIMEOUT:
+                self._queued_bytes -= item.nbytes
                 self._append(item)  # type: ignore[arg-type]
                 self._feed_vad(item)  # type: ignore[arg-type]
             await self._step()

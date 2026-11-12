@@ -26,19 +26,29 @@
       fs: '/sense-voice.onnx',
       url: 'https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx',
       label: 'SenseVoice 模型',
+      sha256: 'c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51',
     },
     {
       fs: '/silero_vad.onnx',
       url: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx',
       label: 'VAD 模型',
+      sha256: '9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6',
     },
     {
       fs: '/tokens.txt',
       url: 'https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt',
       label: '分词表',
+      sha256: 'f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc',
     },
   ];
+  // Keep existing downloads usable offline, but verify their bytes before use.
   const CACHE_NAME = 'jls-asr-v1';
+  const PACKAGE_SHA256 = '4c063aa4af215b02b6c127f3b7be8ae8405ff1285a18117e746f4abe53e5b3be';
+  const PACKAGE_META = { files: [
+    { filename: '/sense-voice.onnx', start: 0, end: 239233841 },
+    { filename: '/silero_vad.onnx', start: 239233841, end: 239877695 },
+    { filename: '/tokens.txt', start: 239877695, end: 240193589 },
+  ], remote_package_size: 240193589 };
   const CACHE_KEY = '/sensevoice-package.data';
   const PROMPTS = {
     zh:
@@ -56,6 +66,20 @@
   let apiKey = '';
   let onEvent = () => {};
   let started = false;
+  let generation = 0;
+  let runtimePromise = null;
+  const scripts = new Map();
+  const pendingRequests = new Set();
+  const timers = new Set();
+
+  function scheduleTranslation(id, text, final) {
+    const epoch = generation;
+    const timer = setTimeout(() => {
+      timers.delete(timer);
+      if (epoch === generation) translate(id, text, final, epoch);
+    }, 0);
+    timers.add(timer);
+  }
 
   const chunks = [];
   let totalSamples = 0;
@@ -100,49 +124,58 @@
   }
 
   function loadScript(src) {
-    return new Promise((resolve, reject) => {
-      const s = document.createElement('script');
-      s.src = src;
-      s.onload = () => resolve();
-      s.onerror = () => reject(new Error('无法加载 ' + src));
-      document.head.appendChild(s);
-    });
+    if (!scripts.has(src)) {
+      scripts.set(src, new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = src;
+        script.onload = resolve;
+        script.onerror = () => { scripts.delete(src); reject(new Error('无法加载 ' + src)); };
+        document.head.appendChild(script);
+      }));
+    }
+    return scripts.get(src);
   }
 
-  // ------------------------------------------------------------ model package
-  async function buildPackage() {
-    try {
-      const cache = await caches.open(CACHE_NAME);
-      const hit = await cache.match(CACHE_KEY);
-      if (hit) {
-        emit({ type: 'progress', message: '识别模型已缓存，正在加载…' });
-        return { url: URL.createObjectURL(await hit.blob()), meta: null };
-      }
-    } catch (e) {
-      /* cache unavailable */
-    }
+  async function verified(buffer, expected) {
+    const digest = await crypto.subtle.digest('SHA-256', buffer);
+    const actual = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+    if (actual !== expected) throw new Error('识别模型校验失败，请重新下载');
+    return buffer;
+  }
 
+  async function fetchModel(url) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 300000);
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      if (!response.ok) throw new Error('模型下载失败 HTTP ' + response.status);
+      return await response.arrayBuffer();
+    } finally { clearTimeout(timer); }
+  }
+
+  async function buildPackage(progress) {
+    let cache;
+    try { cache = await caches.open(CACHE_NAME); } catch {}
+    const hit = cache && await cache.match(CACHE_KEY);
+    if (hit) {
+      try {
+        const buffer = await verified(await hit.arrayBuffer(), PACKAGE_SHA256);
+        progress('识别模型已缓存，正在加载…');
+        return { url: URL.createObjectURL(new Blob([buffer])), meta: PACKAGE_META };
+      } catch { await cache.delete(CACHE_KEY); }
+    }
     const parts = [];
     const meta = { files: [], remote_package_size: 0 };
-    let offset = 0;
-    for (let i = 0; i < MODEL_FILES.length; i++) {
-      const f = MODEL_FILES[i];
-      emit({ type: 'progress', message: `首次使用，下载${f.label}（${i + 1}/${MODEL_FILES.length}）…` });
-      const resp = await fetch(f.url);
-      if (!resp.ok) throw new Error(`${f.label}下载失败 HTTP ${resp.status}`);
-      const buf = new Uint8Array(await resp.arrayBuffer());
-      parts.push(buf);
-      meta.files.push({ filename: f.fs, start: offset, end: offset + buf.length });
-      offset += buf.length;
+    for (const file of MODEL_FILES) {
+      progress('首次使用，下载' + file.label + '…');
+      const buffer = await verified(await fetchModel(file.url), file.sha256);
+      const start = meta.remote_package_size;
+      parts.push(buffer);
+      meta.files.push({ filename: file.fs, start, end: start + buffer.byteLength });
+      meta.remote_package_size += buffer.byteLength;
     }
-    meta.remote_package_size = offset;
     const blob = new Blob(parts, { type: 'application/octet-stream' });
-    try {
-      const cache = await caches.open(CACHE_NAME);
-      await cache.put(CACHE_KEY, new Response(blob));
-    } catch (e) {
-      /* caching is best effort */
-    }
+    try { await cache?.put(CACHE_KEY, new Response(blob, { headers: { 'X-JLS-Metadata': JSON.stringify(meta) } })); } catch {}
     return { url: URL.createObjectURL(blob), meta };
   }
 
@@ -162,12 +195,16 @@
   }
 
   // ------------------------------------------------------------ translation
-  async function translate(id, text, isFinal) {
+  async function translate(id, text, isFinal, epoch) {
+    if (epoch !== generation) return;
     if (!text) return;
     if (!apiKey) {
       emit({ type: 'error', scope: 'translate', message: '未填写 DeepSeek API Key' });
       return;
     }
+    const controller = new AbortController();
+    pendingRequests.add(controller);
+    const timeout = setTimeout(() => controller.abort(), 12000);
     const t0 = performance.now();
     const base = PROMPTS[targetLang] || PROMPTS.zh;
     const system = finalContext
@@ -176,6 +213,7 @@
     try {
       const resp = await fetch('https://api.deepseek.com/chat/completions', {
         method: 'POST',
+        signal: controller.signal,
         headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + apiKey },
         body: JSON.stringify({
           model: 'deepseek-chat',
@@ -190,6 +228,7 @@
       });
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       const data = await resp.json();
+      if (epoch !== generation) return;
       const out = (data.choices?.[0]?.message?.content || '').trim().replace(/^["“](.*)["”]$/, '$1');
       const ms = Math.round(performance.now() - t0);
       translateCount++;
@@ -197,7 +236,10 @@
       if (isFinal) finalContext = text;
       emit({ type: 'translation', id, final: isFinal, text: out, engine: 'deepseek', ms });
     } catch (e) {
-      emit({ type: 'error', scope: 'translate', message: '翻译失败：' + (e.message || e) });
+      if (epoch === generation) emit({ type: 'error', scope: 'translate', message: '翻译失败：' + (e.message || e) });
+    } finally {
+      clearTimeout(timeout);
+      pendingRequests.delete(controller);
     }
   }
 
@@ -278,7 +320,7 @@
         decode_ms: Math.round(lastDecodeMs),
       });
       lastText = text;
-      setTimeout(() => translate(id, text, true), 0);
+      scheduleTranslation(id, text, true);
     } finally {
       busy = false;
       resetSegment();
@@ -331,7 +373,7 @@
           emit({ type: 'partial', id: segId, text, stable, t: +(totalSamples / SAMPLE_RATE).toFixed(2) });
           if (stable.length >= PARTIAL_TRANSLATE_MIN && now - lastPartialTranslateAt >= PARTIAL_TRANSLATE_EVERY) {
             lastPartialTranslateAt = now;
-            setTimeout(() => translate(segId, stable, false), 0);
+            scheduleTranslation(segId, stable, false);
           }
         }
       } finally {
@@ -341,66 +383,94 @@
   }
 
   // ------------------------------------------------------------ init
+  async function loadRuntime(config, progress) {
+    if (!runtimePromise) {
+      runtimePromise = (async () => {
+        // Explicit package URLs are for the developer test harness only.
+        const pkg = config.packageUrl
+          ? { url: config.packageUrl, meta: config.packageMeta || (await (await fetch(config.packageMetaUrl)).json()) }
+          : await buildPackage(progress);
+        const wasmBase = baseUrl() + 'wasm/';
+        let resolveRuntime, rejectRuntime;
+        const initialized = new Promise((resolve, reject) => { resolveRuntime = resolve; rejectRuntime = reject; });
+        initialized.catch(() => {});
+        const module = window.Module = {
+          locateFile: path => path.endsWith('.data') ? pkg.url : wasmBase + path,
+          print: text => { if (text) progress(String(text)); },
+          printErr: text => { if (text) progress(String(text)); },
+          setStatus: text => { if (text) progress(String(text)); },
+          onRuntimeInitialized: () => resolveRuntime(module),
+          onAbort: reason => rejectRuntime(new Error(String(reason))),
+        };
+        if (pkg.meta) module._dataPackageMetadata = pkg.meta;
+        progress('加载识别运行时…');
+        // Define wrappers before a cached model can initialize the runtime.
+        await loadScript(wasmBase + 'sherpa-onnx-asr.js');
+        await loadScript(wasmBase + 'sherpa-onnx-vad.js');
+        await loadScript(wasmBase + 'sherpa-onnx-wasm-main-vad-asr.js');
+        let timeout;
+        try {
+          return await Promise.race([initialized, new Promise((_, reject) => {
+            timeout = setTimeout(() => reject(new Error('识别运行时加载超时')), 300000);
+          })]);
+        } finally { clearTimeout(timeout); }
+      })().catch(error => {
+        scripts.delete(baseUrl() + 'wasm/sherpa-onnx-wasm-main-vad-asr.js');
+        runtimePromise = null;
+        throw error;
+      });
+    }
+    return runtimePromise;
+  }
+
   async function init(config) {
+    stop();
+    const epoch = generation;
     targetLang = config.target || 'zh';
     apiKey = config.apiKey || '';
     onEvent = config.onEvent || (() => {});
-
-    const pkg = config.packageUrl
-      ? { url: config.packageUrl, meta: config.packageMeta || (await (await fetch(config.packageMetaUrl)).json()) }
-      : await buildPackage();
-    const wasmBase = baseUrl() + 'wasm/';
-
-    window.Module = {
-      locateFile: (path) => (path.endsWith('.data') ? pkg.url : wasmBase + path),
-      print: (t) => { if (t) emit({ type: 'progress', message: String(t) }); },
-      printErr: (t) => { if (t) emit({ type: 'progress', message: String(t) }); },
-      setStatus: (t) => { if (t) emit({ type: 'progress', message: String(t) }); },
-      onRuntimeInitialized: () => setupRuntime(),
-    };
-    if (pkg.meta) window.Module._dataPackageMetadata = pkg.meta;
-
-    emit({ type: 'progress', message: '加载识别运行时…' });
-    await loadScript(wasmBase + 'sherpa-onnx-wasm-main-vad-asr.js');
-    await loadScript(wasmBase + 'sherpa-onnx-asr.js');
-    await loadScript(wasmBase + 'sherpa-onnx-vad.js');
-    started = true;
+    const module = await loadRuntime(config, message => {
+      if (epoch === generation) emit({ type: 'progress', message });
+    });
+    if (epoch !== generation) throw new DOMException('采集已取消', 'AbortError');
+    const t0 = performance.now();
+    try {
+      setupRuntime(module);
+      ready = started = true;
+      emit({ type: 'ready', initMs: Math.round(performance.now() - t0) });
+    } catch (error) {
+      stop();
+      throw error;
+    }
   }
 
-  function setupRuntime() {
-    try {
-      const t0 = performance.now();
-      vad = createVad(Module, {
-        sileroVad: {
-          model: '/silero_vad.onnx',
-          threshold: 0.5,
-          minSilenceDuration: 0.4,
-          minSpeechDuration: 0.25,
-          maxSpeechDuration: 20,
-          windowSize: 512,
+  function setupRuntime(module) {
+    vad = createVad(module, {
+      sileroVad: {
+        model: '/silero_vad.onnx',
+        threshold: 0.5,
+        minSilenceDuration: 0.4,
+        minSpeechDuration: 0.25,
+        maxSpeechDuration: 20,
+        windowSize: 512,
+      },
+      tenVad: { model: '', threshold: 0.5, minSilenceDuration: 0.5, minSpeechDuration: 0.25, maxSpeechDuration: 20, windowSize: 256 },
+      sampleRate: 16000,
+      numThreads: 1,
+      provider: 'cpu',
+      debug: 0,
+      bufferSizeInSeconds: 30,
+    });
+    recognizer = new OfflineRecognizer(
+      {
+        modelConfig: {
+          debug: 0,
+          tokens: '/tokens.txt',
+          senseVoice: { model: '/sense-voice.onnx', language: '', useInverseTextNormalization: 1 },
         },
-        tenVad: { model: '', threshold: 0.5, minSilenceDuration: 0.5, minSpeechDuration: 0.25, maxSpeechDuration: 20, windowSize: 256 },
-        sampleRate: 16000,
-        numThreads: 1,
-        provider: 'cpu',
-        debug: 0,
-        bufferSizeInSeconds: 30,
-      });
-      recognizer = new OfflineRecognizer(
-        {
-          modelConfig: {
-            debug: 0,
-            tokens: '/tokens.txt',
-            senseVoice: { model: '/sense-voice.onnx', language: '', useInverseTextNormalization: 1 },
-          },
-        },
-        Module
-      );
-      ready = true;
-      emit({ type: 'ready', initMs: Math.round(performance.now() - t0) });
-    } catch (e) {
-      emit({ type: 'error', scope: 'asr', message: '识别引擎初始化失败：' + (e.message || e) });
-    }
+      },
+      module
+    );
   }
 
   function stats() {
@@ -417,8 +487,23 @@
   }
 
   function stop() {
-    started = false;
-    ready = false;
+    ++generation;
+    started = ready = false;
+    for (const controller of pendingRequests) controller.abort();
+    pendingRequests.clear();
+    for (const timer of timers) clearTimeout(timer);
+    timers.clear();
+    onEvent = () => {};
+    apiKey = finalContext = lastHyp = lastText = '';
+    chunks.length = 0;
+    vadPending = new Float32Array(0);
+    totalSamples = segStart = segId = lastPartialAt = lastPartialTranslateAt = 0;
+    speaking = busy = false;
+    partialInterval = PARTIAL_INTERVAL;
+    decodeMsTotal = decodeCount = finals = translateCount = translateMsTotal = lastDecodeMs = 0;
+    recognizer?.free();
+    vad?.free();
+    recognizer = vad = null;
   }
 
   window.JLSEngine = { init, feed, stop, stats, setConfig: (c) => { if (c.target) targetLang = c.target; if (c.apiKey) apiKey = c.apiKey; } };

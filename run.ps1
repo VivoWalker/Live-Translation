@@ -5,8 +5,16 @@ Set-Location $PSScriptRoot
 if (-not (Test-Path '.venv\Scripts\python.exe')) {
     Write-Host '[jls] 创建虚拟环境…'
     py -3.10 -m venv .venv
-    .\.venv\Scripts\python.exe -m pip install -q -r requirements.txt
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
+
+$pipVersion = .\.venv\Scripts\python.exe -c "import importlib.metadata; print(importlib.metadata.version('pip'))"
+if ([version]$pipVersion -lt [version]'26.2') {
+    .\.venv\Scripts\python.exe -m pip install --upgrade 'pip>=26.2'
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+.\.venv\Scripts\python.exe -m pip install -q -r requirements.txt
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 if (-not $env:DEEPSEEK_API_KEY -and -not (Test-Path 'config.local.json')) {
     Write-Warning '未找到 DeepSeek API Key：复制 config.example.json 为 config.local.json 并填入 key，或设置 $env:DEEPSEEK_API_KEY。当前会退回公共翻译端点。'

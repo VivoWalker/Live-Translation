@@ -26,13 +26,6 @@ function parseWav(buf) {
 }
 
 (async () => {
-  await new Promise((resolve) => {
-    const s = document.createElement('script');
-    s.src = '/static/key.local.js';
-    s.onload = resolve;
-    s.onerror = resolve;
-    document.head.appendChild(s);
-  });
   const apiKey = window.__JLS_TEST_KEY || '';
   await JLSEngine.init({
     target: 'zh',

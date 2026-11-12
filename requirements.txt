@@ -1,9 +1,4 @@
-"""
-Runtime dependencies for ja-live-subs.
-
-  python -m venv .venv
-  .venv\\Scripts\\pip install -r requirements.txt
-"""
+# Runtime dependencies for ja-live-subs.
 sherpa-onnx>=2.0.1,<2.1
 numpy>=1.26
 aiohttp>=3.9

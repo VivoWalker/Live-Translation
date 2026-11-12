@@ -1,7 +1,7 @@
 """Stream a local audio file into the running server exactly like the browser does.
 
     python tools/simulate.py testdata/ja_nanami.mp3 --realtime
-    python tools/simulate.py a.wav --speed 4     # 4x faster than realtime
+    python tools/simulate.py a.wav --speed 2     # up to 2x realtime
 
 Prints every event with the audio position, so字幕延迟 can be read directly:
     [12.40s] partial  今日は東京の天気について…
@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import json
 import time
+import os
 
 import numpy as np
 import soundfile as sf
@@ -33,6 +34,11 @@ async def main() -> int:
     ap.add_argument("--target", default="zh")
     ap.add_argument("--chunk-ms", type=int, default=100)
     args = ap.parse_args()
+    token = os.environ.get('JLSUBS_ACCESS_TOKEN', '')
+    if not token:
+        ap.error('Set JLSUBS_ACCESS_TOKEN to the access token printed by the server')
+    if not 0 < args.speed <= 2 or not 40 <= args.chunk_ms <= 1000:
+        ap.error('speed must be in (0, 2] and chunk-ms must be between 40 and 1000')
 
     audio, sr = sf.read(args.file, dtype="float32", always_2d=True)
     audio = resample_to_16k(audio.mean(axis=1), sr)
@@ -42,6 +48,10 @@ async def main() -> int:
     audio_pos = 0.0
     final_lat: list[float] = []
     async with websockets.connect(args.url, max_size=8 * 1024 * 1024) as ws:
+        await ws.send(json.dumps({'type': 'auth', 'token': token}))
+        ready = json.loads(await asyncio.wait_for(ws.recv(), timeout=6))
+        if ready.get('type') != 'ready':
+            raise RuntimeError('Subtitle service did not authenticate the connection')
         await ws.send(json.dumps({"type": "config", "target": args.target}))
         takeaway: asyncio.Queue = asyncio.Queue()
 
@@ -50,7 +60,6 @@ async def main() -> int:
                 await takeaway.put((time.perf_counter(), json.loads(raw)))
 
         rt = asyncio.create_task(reader())
-        _, ready = await takeaway.get()
         print("server:", ready)
 
         sent = 0.0
@@ -82,6 +91,7 @@ async def main() -> int:
             if ev.get("type") == "stats":
                 break
         rt.cancel()
+        await asyncio.gather(rt, return_exceptions=True)
     if final_lat:
         s = sorted(final_lat)
         print(f"\nfinalize latency over {len(s)} finals: p50={s[len(s)//2]*1000:.0f}ms p95={s[min(len(s)-1,int(len(s)*0.95))]*1000:.0f}ms")
