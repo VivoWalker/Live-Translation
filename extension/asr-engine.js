@@ -49,7 +49,10 @@
     { filename: '/silero_vad.onnx', start: 239233841, end: 239877695 },
     { filename: '/tokens.txt', start: 239877695, end: 240193589 },
   ], remote_package_size: 240193589 };
-  const CACHE_KEY = '/sensevoice-package.data';
+  // Cache.put only supports HTTP(S) request URLs. A relative key resolves to
+  // chrome-extension:// in production and is rejected. This URL is never fetched.
+  const CACHE_KEY = 'https://jls-model-cache.invalid/sensevoice-2024-07-17.data';
+  const LEGACY_CACHE_KEY = '/sensevoice-package.data';
   const PROMPTS = {
     zh:
       '你是专业的日语影视字幕翻译。把用户给出的日语台词翻译成自然、口语化的简体中文，符合字幕阅读习惯。' +
@@ -139,7 +142,11 @@
   async function verified(buffer, expected) {
     const digest = await crypto.subtle.digest('SHA-256', buffer);
     const actual = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
-    if (actual !== expected) throw new Error('识别模型校验失败，请重新下载');
+    if (actual !== expected) {
+      const error = new Error('识别模型校验失败，请重新下载');
+      error.name = 'ModelIntegrityError';
+      throw error;
+    }
     return buffer;
   }
 
@@ -155,19 +162,34 @@
 
   async function buildPackage(progress) {
     let cache;
-    try { cache = await caches.open(CACHE_NAME); } catch {}
-    const hit = cache && await cache.match(CACHE_KEY);
-    if (hit) {
-      try {
-        const buffer = await verified(await hit.arrayBuffer(), PACKAGE_SHA256);
-        progress('识别模型已缓存，正在加载…');
-        return { url: URL.createObjectURL(new Blob([buffer])), meta: PACKAGE_META };
-      } catch { await cache.delete(CACHE_KEY); }
+    let cacheError;
+    try { cache = await caches.open(CACHE_NAME); } catch (error) { cacheError = error; }
+    if (cache) {
+      for (const key of [CACHE_KEY, LEGACY_CACHE_KEY]) {
+        try {
+          const hit = await cache.match(key);
+          if (!hit) continue;
+          const buffer = await verified(await hit.arrayBuffer(), PACKAGE_SHA256);
+          emit({ type: 'model-cache', saved: true, warning: false, message: '识别模型已保存在本地，无需重新下载。' });
+          progress('识别模型已缓存，正在加载…');
+          return { url: URL.createObjectURL(new Blob([buffer])), meta: PACKAGE_META };
+        } catch (error) {
+          cacheError = error;
+          if (error.name === 'ModelIntegrityError') {
+            try { await cache.delete(key); } catch (error) { cacheError = error; }
+            progress('本地模型缓存校验失败，正在重新下载…');
+          }
+        }
+      }
     }
+    emit({ type: 'model-cache', saved: false, warning: false, message: '本地未找到可用模型，正在下载…' });
+    // unlimitedStorage protects the extension from quota/eviction. Also request
+    // persistence where the StorageManager API is supported (e.g. web tests).
+    try { await globalThis.navigator?.storage?.persist?.(); } catch {}
     const parts = [];
     const meta = { files: [], remote_package_size: 0 };
     for (const file of MODEL_FILES) {
-      progress('首次使用，下载' + file.label + '…');
+      progress('本地未找到模型，下载' + file.label + '…');
       const buffer = await verified(await fetchModel(file.url), file.sha256);
       const start = meta.remote_package_size;
       parts.push(buffer);
@@ -175,7 +197,15 @@
       meta.remote_package_size += buffer.byteLength;
     }
     const blob = new Blob(parts, { type: 'application/octet-stream' });
-    try { await cache?.put(CACHE_KEY, new Response(blob, { headers: { 'X-JLS-Metadata': JSON.stringify(meta) } })); } catch {}
+    try {
+      if (!cache) throw cacheError || new Error('Cache Storage unavailable');
+      await cache.put(CACHE_KEY, new Response(blob, { headers: { 'X-JLS-Metadata': JSON.stringify(meta) } }));
+      if (!await cache.match(CACHE_KEY)) throw new Error('Cache readback failed');
+      emit({ type: 'model-cache', saved: true, warning: false, message: '识别模型已保存，重开浏览器后可直接加载。' });
+    } catch (error) {
+      const reason = error.name === 'QuotaExceededError' ? '本地存储空间不足' : '浏览器未能写入本地缓存';
+      emit({ type: 'model-cache', saved: false, warning: true, message: `模型可以用于本次识别，但${reason}；重开浏览器可能需要重新下载。` });
+    }
     return { url: URL.createObjectURL(blob), meta };
   }
 

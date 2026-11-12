@@ -92,7 +92,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!state.running || !msg.sessionId || msg.sessionId !== state.sessionId) return;
     const tabId = state.tabId;
     if (msg.type === 'jls:event') {
-      await chrome.tabs.sendMessage(tabId, { type: 'jls:event', event: msg.event }).catch(() => {});
+      if (msg.event?.type === 'model-cache') {
+        // Persist final results, not a stale "downloading" state after restart.
+        if (msg.event.saved || msg.event.warning) {
+          await chrome.storage.local.set({ jlsModelCache: {
+            saved: msg.event.saved === true, warning: msg.event.warning === true,
+            message: String(msg.event.message || '').slice(0, 300), at: Date.now(),
+          } });
+        }
+      } else {
+        await chrome.tabs.sendMessage(tabId, { type: 'jls:event', event: msg.event }).catch(() => {});
+      }
     } else if (msg.type === 'jls:state') {
       await setStatus({ phase: msg.phase, message: msg.message }, msg.sessionId);
       if (msg.sessionId !== state.sessionId) return;

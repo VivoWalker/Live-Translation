@@ -14,6 +14,7 @@ const apiKeyEl = $('apikey');
 const serverField = $('server-field');
 const tokenField = $('token-field');
 const tokenEl = $('server-token');
+const cacheStatusEl = $('model-cache-status');
 
 let activeTab = null;
 let running = false;
@@ -45,6 +46,12 @@ function syncEngineFields() {
   const browser = engineEl.value === 'browser';
   serverField.hidden = browser;
   tokenField.hidden = browser;
+  cacheStatusEl.hidden = !browser;
+}
+
+function showModelCache(info) {
+  cacheStatusEl.textContent = info?.message || '';
+  cacheStatusEl.className = 'hint' + (info?.warning ? ' warning' : '');
 }
 
 function setRunning(on) {
@@ -56,6 +63,8 @@ function setRunning(on) {
 }
 
 async function pollState() {
+  const cache = (await chrome.storage.local.get('jlsModelCache')).jlsModelCache;
+  showModelCache(cache);
   const st = (await chrome.storage.session.get('jlsStatus')).jlsStatus || {};
   if (!st.phase) return;
   if (st.phase === 'error') {
@@ -83,12 +92,13 @@ async function init() {
   activeTab = tab || null;
   $('tab-title').textContent = tab ? (tab.title || tab.url || '当前标签页') : '没有可用标签页';
 
-  const store = await chrome.storage.local.get(['jlsTarget', 'jlsServer', 'jlsEngine', 'jlsApiKey', 'jlsServerToken']);
+  const store = await chrome.storage.local.get(['jlsTarget', 'jlsServer', 'jlsEngine', 'jlsApiKey', 'jlsServerToken', 'jlsModelCache']);
   targetEl.value = store.jlsTarget || 'zh';
   serverEl.value = store.jlsServer || DEFAULT_SERVER;
   engineEl.value = store.jlsEngine || 'browser';
   apiKeyEl.value = store.jlsApiKey || '';
   tokenEl.value = store.jlsServerToken || '';
+  showModelCache(store.jlsModelCache);
   syncEngineFields();
 
   const st = await chrome.runtime.sendMessage({ type: 'jls:query' }).catch(() => null);
