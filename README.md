@@ -64,6 +64,10 @@ WASM 版明显更吃 CPU（1/4–1/2 核，取决于窗口长度和机器负载�
 3. 首次会下载约 240 MB 模型（弹窗会显示进度），之后走缓存。
 4. 字幕叠加在网页底部，右上角出现「字幕已开启」提示。
 
+模型应在浏览器重启后保留。每次启动仍需把本地模型加载进 WASM 内存；“识别模型已缓存，正在加载…”表示本地加载，不是重新下载。弹窗会显示模型是否已保存，写入失败时会明确提醒。
+
+0.3.2 修复了扩展缓存键被解析成 `chrome-extension://`、导致 Cache API 写入失败的问题。现在使用合法的 HTTPS 缓存索引（仅本地索引，不会访问该地址），并申请 `unlimitedStorage` 保护约 240 MB 的模型免受配额和回收影响。更新后在原有扩展条目点击“重新加载”，保持原目录和扩展 ID；卸载或改换扩展 ID 后，旧缓存可能不再可见。旧版本没保存成功的模型仍需下载一次。
+
 ### 3.2 本地服务（可选）
 
 ```powershell
@@ -129,7 +133,17 @@ python -m unittest discover -s tests -v
 node --test tests/extension.test.mjs
 ```
 
-JavaScript 测试需要 Node.js 22 或更新版本，覆盖启动取消、旧会话结果丢弃、模式转发和损坏模型拒绝。浏览器演示测试 `node tools/browser_check.mjs` 需设置 `JLS_CHROME` 和 `JLSUBS_ACCESS_TOKEN`；完整扩展测试仍需浏览器允许加载未打包扩展。下面为原型早期验证记录，不代表本次修改已重复验证真实计费 API 或真实标签页采集：
+JavaScript 测试需要 Node.js 22 或更新版本，覆盖启动取消、旧会话结果丢弃、模式转发和损坏模型拒绝。浏览器演示测试 `node tools/browser_check.mjs` 需设置 `JLS_CHROME` 和 `JLSUBS_ACCESS_TOKEN`；完整扩展测试仍需浏览器允许加载未打包扩展。
+
+已有本地模型时，可额外运行跨浏览器进程缓存回归测试：
+
+```sh
+JLS_CHROME=/path/to/chrome node tools/cache_check.mjs --model-dir /path/to/sensevoice-onnx --vad-model /path/to/silero_vad.onnx
+```
+
+该测试使用临时 Chrome 配置和真实模型文件验证摘要、磁盘缓存及关闭后重开时零模型下载；WASM 识别接口使用桩，测试不连接翻译 API。它同时复现旧 `chrome-extension://` 缓存键的 TypeError，不会修改用户的浏览器配置。
+
+下面为原型早期验证记录，不代表本次修改已重复验证真实计费 API 或真实标签页采集：
 
 | 检查 | 结果 |
 | --- | --- |
