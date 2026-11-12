@@ -49,7 +49,11 @@
       const ws = new WebSocket(wsUrl());
       ws.binaryType = 'arraybuffer';
       const timer = setTimeout(() => reject(new Error('连接字幕服务超时')), 5000);
-      ws.onopen = () => ws.send(JSON.stringify({ type: 'config', target: targetEl.value }));
+      ws.onopen = () => {
+        const token = $('access-token').value.trim();
+        ws.send(JSON.stringify({ type: 'auth', token }));
+        ws.send(JSON.stringify({ type: 'config', target: targetEl.value }));
+      };
       ws.onmessage = (ev) => {
         let msg;
         try {
@@ -67,7 +71,9 @@
         clearTimeout(timer);
         reject(new Error('无法连接字幕服务，请先启动 python -m server.app'));
       };
-      ws.onclose = () => {
+      ws.onclose = (event) => {
+        clearTimeout(timer);
+        reject(new Error(event.code === 1008 ? '字幕服务拒绝连接，请检查访问令牌或音频速率' : '字幕服务已断开'));
         if (state.ws === ws) {
           state.ws = null;
           if (state.capturing) setStatus('连接中断', 'err');
@@ -160,6 +166,10 @@
 
   async function start(kind, url) {
     if (state.capturing) return;
+    if (!$('access-token').value.trim()) {
+      setStatus('请填写服务启动时显示的访问令牌', 'err');
+      return;
+    }
     setRunning(true);
     setStatus('连接字幕服务…', 'busy');
     state.captions.root.classList.remove('hidden');

@@ -112,6 +112,11 @@ try {
   const { sessionId } = await call(ws, 'Target.attachToTarget', { targetId, flatten: true });
   await call(ws, 'Runtime.enable', {}, sessionId);
   await call(ws, 'Page.enable', {}, sessionId);
+  const accessToken = process.env.JLSUBS_ACCESS_TOKEN;
+  if (!accessToken) throw new Error('Set JLSUBS_ACCESS_TOKEN for the authenticated service');
+  await call(ws, 'Page.addScriptToEvaluateOnNewDocument', {
+    source: `document.addEventListener('DOMContentLoaded', () => { document.getElementById('access-token').value = ${JSON.stringify(accessToken)}; });`,
+  }, sessionId);
   await call(ws, 'Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false }, sessionId);
   await call(ws, 'Page.navigate', { url: PAGE_URL }, sessionId);
   await sleep(1500);

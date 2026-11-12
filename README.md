@@ -68,12 +68,19 @@ WASM 版明显更吃 CPU（1/4–1/2 核，取决于窗口长度和机器负载�
 
 ```powershell
 python -m venv .venv
+.venv\Scripts\python -m pip install --upgrade 'pip>=26.2'
 .venv\Scripts\pip install -r requirements.txt
 copy config.example.json config.local.json   # 填 deepseek_api_key
 .\.venv\Scripts\python -m server.app          # http://127.0.0.1:8765/
 ```
 
 服务同时提供演示页（`getDisplayMedia` 选标签页），不装扩展也能看效果。
+
+服务启动时会生成并显示**本地服务访问令牌**。在演示页或扩展的「本地服务」模式里填入该令牌；浏览器内模式只需要 DeepSeek Key，不检查本地服务。服务重启后随机令牌会变化；如需固定令牌，可设置 `JLSUBS_ACCESS_TOKEN`（至少 32 个随机 ASCII 字符），也可在仅本机保存的 `config.local.json` 中配置 `access_token`。不要把它和 DeepSeek Key 混用，也不要把密钥写入网页静态文件。
+
+Linux/macOS 可用 `.venv/bin/python -m pip` 安装，随后运行 `.venv/bin/python -m server.app`。服务默认只接受本机 Host、同源网页或 Chrome 扩展来源，所有 WebSocket 客户端都必须认证。需要额外 HTTP 主机名时显式传入 `--allow-host example.com`；远程使用应部署 HTTPS，不要把原始服务端口直接公开。
+
+生产启动只公开演示页所需静态资源。调试 `engine-test.html`、扩展资产等需要显式加 `--dev-assets`；`key.local.js` 始终不会通过 HTTP 提供。浏览器模型下载和缓存都验证固定 SHA-256，更新模型时必须同步审核并更新摘要。
 
 ## 4. 字幕为什么不会「跳」
 
@@ -90,7 +97,9 @@ copy config.example.json config.local.json   # 填 deepseek_api_key
 
 ## 5. 协议（服务模式）
 
-客户端 → 服务端：`{"type":"config","target":"zh"}` + 二进制 float32 PCM 帧；服务端 → 客户端：`ready / partial / final / translation / stats / error`。浏览器内模式复用同一套事件对象，所以字幕层不用区分来源。
+客户端 → 服务端：第一条消息必须是 `{"type":"auth","token":"<访问令牌>"}`，认证成功后服务端发送 `ready`，再接受 `{"type":"config","target":"zh"}` 和二进制 float32 PCM 帧。认证等待最多 5 秒；每帧不超过 64 KiB，排队音频不超过 256 KiB，持续发送不超过 2 倍实时速率，最多 8 个连接。正常客户端使用 100 ms（6400 字节）的帧。服务端事件为 `ready / partial / final / translation / stats / error`。
+
+命令行模拟器读取环境变量 `JLSUBS_ACCESS_TOKEN`，例如先在当前终端设置服务显示的令牌，再运行 `python tools/simulate.py testdata/ja_nanami.mp3 --speed 1`。令牌不会出现在 WebSocket URL 或 HTTP 查询日志中。
 
 ## 6. 目录
 
@@ -111,6 +120,16 @@ ja-live-subs/
 ```
 
 ## 7. 验证记录
+
+当前安全回归测试（不使用真实 API Key、无需下载模型）：
+
+```sh
+python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m unittest discover -s tests -v
+node --test tests/extension.test.mjs
+```
+
+JavaScript 测试需要 Node.js 22 或更新版本，覆盖启动取消、旧会话结果丢弃、模式转发和损坏模型拒绝。浏览器演示测试 `node tools/browser_check.mjs` 需设置 `JLS_CHROME` 和 `JLSUBS_ACCESS_TOKEN`；完整扩展测试仍需浏览器允许加载未打包扩展。下面为原型早期验证记录，不代表本次修改已重复验证真实计费 API 或真实标签页采集：
 
 | 检查 | 结果 |
 | --- | --- |
