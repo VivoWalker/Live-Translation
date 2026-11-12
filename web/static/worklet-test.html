@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head><meta charset="utf-8" /><title>worklet pull test</title></head>
+<body style="background:#111;color:#eee;font-family:monospace;white-space:pre">
+<div id="out">running…</div>
+<script>
+(async () => {
+  const log = [];
+  async function run(outputs) {
+    const ctx = new AudioContext({ sampleRate: 16000 });
+    await ctx.audioWorklet.addModule('/static/worklet-probe.js');
+    const osc = ctx.createOscillator();
+    osc.frequency.value = 440;
+    const node = new AudioWorkletNode(ctx, 'probe', {
+      numberOfInputs: 1, numberOfOutputs: outputs, channelCount: 1, channelCountMode: 'explicit',
+    });
+    let n = 0;
+    node.port.onmessage = () => n++;
+    osc.connect(node);
+    osc.start();
+    await new Promise((r) => setTimeout(r, 1200));
+    const suspendState = ctx.state;
+    await ctx.close();
+    log.push(`outputs=${outputs} messages=${n} ctx=${suspendState}`);
+  }
+  await run(0);
+  await run(1);
+  document.getElementById('out').textContent = log.join('\n');
+  window.__probe = log;
+})();
+</script>
+</body>
+</html>

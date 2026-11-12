@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head><meta charset="utf-8" /><title>engine test</title></head>
+<body style="background:#111;color:#eee;font-family:monospace;white-space:pre-wrap;padding:16px">
+<div id="out">starting…</div>
+<script src="/ext-assets/asr-engine.js"></script>
+<script>
+window.__etest = { events: [], stage: 'boot', t0: Date.now() };
+const el = document.getElementById('out');
+function say(t) { window.__etest.stage = t; el.textContent = t + '\n\n' + window.__etest.events.slice(-10).map((e) => JSON.stringify(e)).join('\n'); }
+
+function parseWav(buf) {
+  const v = new DataView(buf);
+  let off = 12, dataOff = 0, dataLen = 0, ch = 1, sr = 16000, bits = 16;
+  while (off + 8 <= v.byteLength) {
+    const id = String.fromCharCode(v.getUint8(off), v.getUint8(off+1), v.getUint8(off+2), v.getUint8(off+3));
+    const size = v.getUint32(off + 4, true);
+    if (id === 'fmt ') { ch = v.getUint16(off + 10, true); sr = v.getUint32(off + 12, true); bits = v.getUint16(off + 22, true); }
+    else if (id === 'data') { dataOff = off + 8; dataLen = size; break; }
+    off += 8 + size + (size % 2);
+  }
+  const n = Math.floor(dataLen / (bits / 8) / ch);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = bits === 16 ? v.getInt16(dataOff + i * ch * 2, true) / 32768 : v.getFloat32(dataOff + i * ch * 4, true);
+  return out;
+}
+
+(async () => {
+  await new Promise((resolve) => {
+    const s = document.createElement('script');
+    s.src = '/static/key.local.js';
+    s.onload = resolve;
+    s.onerror = resolve;
+    document.head.appendChild(s);
+  });
+  const apiKey = window.__JLS_TEST_KEY || '';
+  await JLSEngine.init({
+    target: 'zh',
+    apiKey,
+    packageUrl: location.origin + '/asr-assets/sherpa-onnx-wasm-main-vad-asr.data',
+    packageMetaUrl: location.origin + '/asr-assets/sensevoice-meta.json',
+    onEvent: (ev) => {
+      ev.at = Date.now() - window.__etest.t0;
+      window.__etest.events.push(ev);
+      if (ev.type === 'ready') say('ready ' + ev.initMs + 'ms');
+      else if (ev.type === 'error') say('ERROR ' + ev.message);
+      else say(ev.type);
+    },
+  });
+  const t0 = Date.now();
+  while (!window.__etest.events.some((e) => e.type === 'ready') && Date.now() - t0 < 40000) {
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  if (!window.__etest.events.some((e) => e.type === 'ready')) { say('not ready'); return; }
+
+  const wav = parseWav(await (await fetch('/static/sample-ja.wav')).arrayBuffer());
+  window.__etest.meta = { dur: +(wav.length / 16000).toFixed(2) };
+  say('streaming');
+  const chunk = 1600;
+  const start = performance.now();
+  for (let i = 0; i < wav.length; i += chunk) {
+    JLSEngine.feed(wav.slice(i, i + chunk));
+    const due = start + ((i + chunk) / 16000) * 1000;
+    const wait = due - performance.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  }
+  await new Promise((r) => setTimeout(r, 9000));
+  window.__etest.stats = JLSEngine.stats();
+  say('done');
+})().catch((e) => say('FATAL ' + e.message));
+</script>
+</body>
+</html>

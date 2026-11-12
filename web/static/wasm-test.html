@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head><meta charset="utf-8" /><title>wasm asr test</title></head>
+<body style="background:#111;color:#eee;font-family:monospace;white-space:pre-wrap;padding:16px">
+<div id="out">loading…</div>
+<script>
+window.__asr = { stage: 'boot' };
+window.addEventListener('error', (e) => { window.__asr.err = String(e.message); });
+window.addEventListener('unhandledrejection', (e) => { window.__asr.err = 'rejection: ' + String(e.reason && e.reason.message || e.reason); });
+const jlsOut = (t) => { document.getElementById('out').textContent = t; window.__asr.stage = t; };
+
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = () => res();
+    s.onerror = () => rej(new Error('load failed: ' + src));
+    document.body.appendChild(s);
+  });
+}
+
+function parseWav(buf) {
+  const v = new DataView(buf);
+  let off = 12, fmt = null, dataOff = 0, dataLen = 0, ch = 1, sr = 16000, bits = 16;
+  while (off + 8 <= v.byteLength) {
+    const id = String.fromCharCode(v.getUint8(off), v.getUint8(off+1), v.getUint8(off+2), v.getUint8(off+3));
+    const size = v.getUint32(off + 4, true);
+    if (id === 'fmt ') {
+      ch = v.getUint16(off + 10, true);
+      sr = v.getUint32(off + 12, true);
+      bits = v.getUint16(off + 22, true);
+    } else if (id === 'data') {
+      dataOff = off + 8;
+      dataLen = size;
+      break;
+    }
+    off += 8 + size + (size % 2);
+  }
+  const n = Math.floor(dataLen / (bits / 8) / ch);
+  const samples = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    if (bits === 16) samples[i] = v.getInt16(dataOff + i * ch * 2, true) / 32768;
+    else if (bits === 32) samples[i] = v.getFloat32(dataOff + i * ch * 4, true);
+  }
+  return { samples, sr, ch };
+}
+
+(async () => {
+  try {
+    jlsOut('fetching metadata…');
+    const meta = await (await fetch('/asr-assets/sensevoice-meta.json')).json();
+    window.Module = {
+      locateFile: (p) => '/asr-assets/' + p,
+      _dataPackageMetadata: meta,
+      onRuntimeInitialized: () => { jlsOut('runtime ready'); initAsr(); },
+      setStatus: (t) => { if (t) { window.__asr.status = t; } },
+    };
+    jlsOut('loading runtime js…');
+    await loadScript('/asr-assets/sherpa-onnx-wasm-main-vad-asr.js');
+    window.__asr.glue = typeof Module.__expected === 'undefined' ? 'ok' : 'ok';
+    jlsOut('glue loaded');
+    await loadScript('/asr-assets/sherpa-onnx-asr.js');
+    jlsOut('asr.js loaded');
+    await loadScript('/asr-assets/sherpa-onnx-vad.js');
+    jlsOut('vad.js loaded');
+    window.__asr.moduleKeys = Object.keys(Module).slice(0, 12);
+  } catch (e) {
+    jlsOut('ERROR ' + e.message);
+    window.__asr.error = String(e);
+  }
+})();
+
+function fileExists(name) {
+  const len = Module.lengthBytesUTF8(name) + 1;
+  const buf = Module._malloc(len);
+  Module.stringToUTF8(name, buf, len);
+  const ok = Module._SherpaOnnxFileExists(buf);
+  Module._free(buf);
+  return ok;
+}
+
+function initAsr() {
+  try {
+    const t0 = performance.now();
+    const vad = createVad(Module);
+    const recognizer = new OfflineRecognizer({
+      modelConfig: {
+        debug: 0,
+        tokens: '/tokens.txt',
+        senseVoice: { model: '/sense-voice.onnx', language: 'ja', useInverseTextNormalization: 1 },
+      },
+    }, Module);
+    window.__asr.hasModel = fileExists('/sense-voice.onnx') === 1;
+    window.__asr.initMs = Math.round(performance.now() - t0);
+    jlsOut('initialized in ' + window.__asr.initMs + 'ms, decoding…');
+    decode(recognizer, vad);
+  } catch (e) {
+    jlsOut('INIT ERROR ' + e.message);
+    window.__asr.error = String(e);
+  }
+}
+
+async function decode(recognizer, vad) {
+  try {
+    const buf = await (await fetch('/static/sample-ja.wav')).arrayBuffer();
+    const wav = parseWav(buf);
+    const t0 = performance.now();
+    const stream = recognizer.createStream();
+    stream.acceptWaveform(16000, wav.samples);
+    recognizer.decode(stream);
+    const text = recognizer.getResult(stream);
+    stream.free();
+    const ms = performance.now() - t0;
+    const dur = wav.samples.length / 16000;
+    window.__asr = Object.assign(window.__asr, {
+      ready: true,
+      text: text.text,
+      ms: Math.round(ms),
+      duration: +dur.toFixed(2),
+      rtf: +(ms / 1000 / dur).toFixed(3),
+      vadCreated: !!vad,
+    });
+    jlsOut('RESULT ' + JSON.stringify(window.__asr));
+  } catch (e) {
+    jlsOut('DECODE ERROR ' + e.message);
+    window.__asr.error = String(e);
+  }
+}
+</script>
+</body>
+</html>

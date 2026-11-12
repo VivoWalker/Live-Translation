@@ -1,0 +1,46 @@
+:root {
+  --bg: #0f1219;
+  --panel: #171c26;
+  --line: #262e3d;
+  --text: #e9edf5;
+  --dim: #93a0b4;
+  --accent: #5b8cff;
+  --ok: #35d07f;
+  --err: #ff6b6b;
+  --warn: #f2b544;
+}
+* { box-sizing: border-box; }
+body {
+  width: 320px; margin: 0; padding: 16px;
+  background: var(--bg); color: var(--text);
+  font-family: "Segoe UI", "Yu Gothic UI", system-ui, sans-serif;
+}
+header { display: flex; align-items: center; justify-content: space-between; }
+.title { font-weight: 700; font-size: 15px; letter-spacing: .02em; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: #39404f; }
+.dot.ok { background: var(--ok); box-shadow: 0 0 0 4px rgba(53, 208, 127, .14); }
+.dot.bad { background: var(--err); }
+.dot.busy { background: var(--warn); }
+
+.now {
+  margin: 10px 0 14px; font-size: 12px; color: var(--dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.field { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; font-size: 13px; color: var(--dim); }
+.field select, .field input {
+  flex: 1; max-width: 210px; background: #0c1017; color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px;
+  font: inherit; font-size: 12px;
+}
+.actions { display: flex; gap: 8px; margin: 14px 0 10px; }
+button {
+  flex: 1; font: inherit; font-weight: 600; font-size: 13px;
+  padding: 9px 12px; border-radius: 9px; border: 1px solid transparent; cursor: pointer;
+}
+button.primary { background: var(--accent); color: #fff; }
+button.ghost { background: transparent; border-color: var(--line); color: var(--text); }
+button:disabled { opacity: .45; cursor: default; }
+.status { font-size: 12px; color: var(--dim); margin: 0 0 8px; min-height: 16px; }
+.status.err { color: var(--err); }
+.hint { font-size: 11px; line-height: 1.6; color: #7c8798; margin: 0; }

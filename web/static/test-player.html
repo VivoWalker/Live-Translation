@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head><meta charset="utf-8" /><title>jls test player</title></head>
+<body style="background:#111;color:#eee;font-family:sans-serif">
+  <h1>jls test player</h1>
+  <p>このページはテスト用に日本語音声をループ再生します。</p>
+  <audio id="a" src="/static/sample-ja.wav" loop autoplay controls></audio>
+  <script>
+    const a = document.getElementById('a');
+    a.volume = 1;
+    a.play().catch(() => {});
+  </script>
+</body>
+</html>

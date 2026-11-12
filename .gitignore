@@ -1,0 +1,13 @@
+.venv/
+.pipcache/
+__pycache__/
+*.pyc
+config.local.json
+web/static/key.local.js
+out/
+wasm-test/
+testdata/long_*.mp3
+.chrome-test*/
+.chrome-ext-test*/
+.edge-ext-test*/
+*.log

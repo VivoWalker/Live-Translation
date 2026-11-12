@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <div class="title">实时字幕</div>
+    <div class="dot" id="dot"></div>
+  </header>
+
+  <p class="now" id="tab-title">当前标签页</p>
+
+  <label class="field">
+    译文
+    <select id="target">
+      <option value="zh" selected>简体中文</option>
+      <option value="en">English</option>
+    </select>
+  </label>
+
+  <label class="field">
+    识别引擎
+    <select id="engine">
+      <option value="browser">浏览器内（免安装）</option>
+      <option value="server">本地服务（更高帧率）</option>
+    </select>
+  </label>
+
+  <label class="field">
+    DeepSeek Key
+    <input id="apikey" type="password" placeholder="sk-…（只存本机）" autocomplete="off" />
+  </label>
+
+  <label class="field" id="server-field" hidden>
+    本地服务
+    <input id="server" type="text" spellcheck="false" />
+  </label>
+
+  <div class="actions">
+    <button id="start" class="primary">开始字幕</button>
+    <button id="stop" class="ghost" disabled>停止</button>
+  </div>
+
+  <p class="status" id="status">检查服务…</p>
+  <p class="hint">浏览器内模式首次使用会下载约 240 MB 识别模型（之后走缓存）。开始后本页音频会被采集，播放不受影响，字幕叠加在网页底部可拖动。</p>
+
+  <script src="popup.js"></script>
+</body>
+</html>

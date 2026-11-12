@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ja-live-subs · 实时日语字幕</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div class="brand">ja&#8209;live&#8209;subs</div>
+      <h1>本机日语识别 · DeepSeek 翻译 · 浏览器实时字幕</h1>
+      <p class="sub">
+        音频只在本机识别（SenseVoice&#8209;Small int8，约占单核 3–8%），只有识别出的文字会发给翻译接口。
+      </p>
+    </header>
+
+    <section class="panel">
+      <div class="row">
+        <button id="btn-start" class="primary">开始字幕（选择标签页）</button>
+        <button id="btn-stop" class="ghost" disabled>停止</button>
+        <label class="target">
+          译文
+          <select id="target">
+            <option value="zh" selected>简体中文</option>
+            <option value="en">English</option>
+          </select>
+        </label>
+      </div>
+      <div class="row meta">
+        <span class="dot" id="dot"></span>
+        <span id="status">未连接</span>
+        <span class="sep">·</span>
+        <span id="engine">—</span>
+        <span class="sep">·</span>
+        <span id="stats">RTF —</span>
+      </div>
+      <p class="hint">
+        提示：在弹窗里选择正在播放视频的<strong>标签页</strong>，并勾选“分享标签页音频”。
+        字幕会显示在本页底部；播放视频的页面本身不会被修改。
+      </p>
+      <p class="hint dim">
+        没有视频？<a href="#" id="link-file">用内置日语音频测试</a>，走完全相同的 WebSocket 与字幕链路。
+      </p>
+    </section>
+  </main>
+
+  <script src="/static/captions.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

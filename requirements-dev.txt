@@ -1,0 +1,4 @@
+# Dev / verification helpers (not needed to run the server).
+websockets>=12
+soundfile>=0.12
+edge-tts>=7
