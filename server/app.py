@@ -33,7 +33,7 @@ from aiohttp import WSMsgType, web
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from server.asr import SenseVoiceRecognizer  # noqa: E402
+from server.asr import Recognizer, create_recognizer  # noqa: E402
 from server.streaming import SessionConfig, StreamSession  # noqa: E402
 from server.translate import TranslationPipeline, create_translator  # noqa: E402
 from server.security import (  # noqa: E402
@@ -46,7 +46,7 @@ WEB_DIR = ROOT / "web"
 
 class AppState:
     def __init__(
-        self, asr: SenseVoiceRecognizer, translator: TranslationPipeline, *,
+        self, asr: Recognizer, translator: TranslationPipeline, *,
         access_token: str | None = None, allowed_hosts: set[str] | None = None,
     ):
         self.asr = asr
@@ -131,7 +131,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
             while True:
                 await ws.send_json(await out.get())
         writer_task = asyncio.create_task(writer())
-        await ws.send_json({"type": "ready", "asr": "sensevoice-int8", "translator": state.engine, "source": "ja", "target": "zh"})
+        await ws.send_json({"type": "ready", "asr": state.asr.name, "translator": state.engine, "source": "ja", "target": "zh"})
         audio_budget = RateBudget(128000, 256000)  # Up to 2x realtime, four-second burst.
         control_budget = RateBudget(20, 40)
         message_budget = RateBudget(50, 100)
@@ -190,7 +190,7 @@ async def health(request: web.Request) -> web.Response:
     return web.json_response(
         {
             "ok": True,
-            "asr": "sensevoice-int8",
+            "asr": state.asr.name,
             "translator": state.engine,
             "sessions": state.sessions,
             "uptime_s": round(time.time() - state.started, 1),
@@ -257,15 +257,21 @@ def main() -> int:
         default=int(os.environ.get("JLSUBS_ASR_THREADS", cfg.get("asr_threads", 4))),
     )
     ap.add_argument("--model-dir", default=cfg.get("model_dir"))
+    ap.add_argument("--asr", choices=("sensevoice", "whisper"),
+                    default=os.environ.get("JLSUBS_ASR", cfg.get("asr", "sensevoice")),
+                    help="Local recognition backend (default: sensevoice)")
     ap.add_argument("--dev-assets", action="store_true", help="Expose non-secret development test pages")
     ap.add_argument("--allow-host", action="append", default=[], help="Additional trusted HTTP hostname (no scheme or port)")
     args = ap.parse_args()
 
     api_key = os.environ.get("DEEPSEEK_API_KEY") or cfg.get("deepseek_api_key")
-    asr = SenseVoiceRecognizer(model_dir=args.model_dir, language="ja", num_threads=args.threads)
+    try:
+        asr = create_recognizer(args.asr, model_dir=args.model_dir, language="ja", num_threads=args.threads)
+    except (FileNotFoundError, ValueError) as exc:
+        ap.error(str(exc))
     translator = TranslationPipeline(create_translator(args.translator, api_key))
     state = AppState(asr, translator, access_token=os.environ.get("JLSUBS_ACCESS_TOKEN") or cfg.get("access_token"), allowed_hosts=LOCAL_HOSTS | set(args.allow_host))
-    print(f"[jls] asr=sensevoice-int8 threads={args.threads} translator={translator.engine}")
+    print(f"[jls] asr={asr.name} threads={args.threads} translator={translator.engine}")
     if translator.engine == "deepseek":
         print(f"[jls] deepseek model={os.environ.get('DEEPSEEK_MODEL', 'deepseek-chat')}")
     elif translator.engine == "google-public":

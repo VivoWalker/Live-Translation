@@ -1,4 +1,5 @@
 {
+  "asr": "sensevoice",
   "translator": "deepseek",
   "deepseek_api_key": "sk-在这里填入你的 DeepSeek API Key",
   "port": 8765,

@@ -2,8 +2,8 @@
 
 Design constraints
 ------------------
-* One ASR call costs ~1-2 % of realtime on a desktop CPU (measured), but we
-  still decode a *growing window* every ~600 ms instead of every audio chunk.
+* Preview pacing follows the backend and measured decoding cost. Whisper
+  needs longer windows and less frequent previews than SenseVoice.
 * Partials are cheap previews; finals come from Silero-VAD segments.
 * Translation only happens for finals plus throttled long partials.
 """
@@ -15,14 +15,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .asr import SAMPLE_RATE, SileroVad, SenseVoiceRecognizer
+from .asr import SAMPLE_RATE, SileroVad, Recognizer
 from .text import looks_complete, normalize_ja, stable_prefix
 from .translate import TranslationPipeline
 from .security import MAX_BUFFERED_BYTES, MAX_FRAME_BYTES
 
 VAD_FRAME = 512
-PARTIAL_INTERVAL = 0.6
-MIN_PARTIAL_SPEECH = 0.9
 MAX_SEGMENT = 12.0
 MAX_WINDOW = 8.0
 KEEP_SECONDS = 20.0
@@ -65,7 +63,7 @@ class Stats:
 class StreamSession:
     def __init__(
         self,
-        asr: SenseVoiceRecognizer,
+        asr: Recognizer,
         translator: TranslationPipeline,
         on_event,
         config: SessionConfig | None = None,
@@ -88,6 +86,7 @@ class StreamSession:
         self._seg_start = 0
         self._seg_id = 0
         self._last_partial_at = 0.0
+        self._last_partial_total = 0
         self._last_partial_tr_at = 0.0
         self._last_hyp = ""
         self._last_text = ""
@@ -218,7 +217,7 @@ class StreamSession:
         end = self._total
         start = max(self._seg_start, int(end - MAX_WINDOW * SAMPLE_RATE))
         audio = self._slice(start, end)
-        if len(audio) < SAMPLE_RATE * MIN_PARTIAL_SPEECH:
+        if len(audio) < SAMPLE_RATE * self.asr.min_partial_speech:
             return
         text = await self._decode(audio)
         if not text:
@@ -268,6 +267,7 @@ class StreamSession:
         self._last_hyp = ""
         self._last_text = ""
         self._last_partial_at = 0.0
+        self._last_partial_total = self._total
 
     # ---------------------------------------------------------------- loop
     async def _step(self) -> None:
@@ -291,8 +291,12 @@ class StreamSession:
         dur = (self._total - self._seg_start) / SAMPLE_RATE
         if dur >= MAX_SEGMENT:
             await self._finalize(self._slice(self._seg_start, self._total), self._total / SAMPLE_RATE)
-        elif dur >= MIN_PARTIAL_SPEECH and time.monotonic() - self._last_partial_at >= PARTIAL_INTERVAL:
+        elif (dur >= self.asr.min_partial_speech
+              and self._total > self._last_partial_total
+              and time.monotonic() - self._last_partial_at >= max(
+                  self.asr.partial_interval, self._last_decode_ms / 1000 * 1.5)):
             self._last_partial_at = time.monotonic()
+            self._last_partial_total = self._total
             await self._emit_partial()
 
     async def _run(self) -> None:

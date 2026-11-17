@@ -3,6 +3,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import aiohttp
@@ -31,7 +32,7 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
         self.vad_patch = patch('server.streaming.SileroVad', FakeVad)
         self.vad_patch.start()
         self.addCleanup(self.vad_patch.stop)
-        self.state = AppState(None, TranslationPipeline(MockTranslator()), access_token=TOKEN)
+        self.state = AppState(SimpleNamespace(name="sensevoice-int8"), TranslationPipeline(MockTranslator()), access_token=TOKEN)
         self.server = TestServer(build_app(self.state))
         await self.server.start_server()
         self.client = aiohttp.ClientSession()
@@ -64,6 +65,14 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status, 200)
                 self.assertNotIn(TOKEN, await response.text())
                 self.assertEqual(response.headers['X-Content-Type-Options'], 'nosniff')
+
+    async def test_health_and_ready_report_the_selected_asr(self):
+        self.state.asr.name = 'whisper-base-int8'
+        async with self.client.get(self.server.make_url('/health')) as response:
+            self.assertEqual((await response.json())['asr'], 'whisper-base-int8')
+        async with self.client.ws_connect(self.server.make_url('/ws')) as ws:
+            await ws.send_json({'type': 'auth', 'token': TOKEN})
+            self.assertEqual((await ws.receive_json())['asr'], 'whisper-base-int8')
 
     async def test_wrong_token_or_audio_before_auth_closes(self):
         for first in ({'type': 'auth', 'token': 'wrong'}, {'type': 'config'}, None):
@@ -129,7 +138,7 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
             (root / 'static').mkdir()
             (root / 'static/key.local.js').write_text('window.SECRET="dummy";')
             with patch('server.app.WEB_DIR', root):
-                dev = TestServer(build_app(AppState(None, TranslationPipeline(MockTranslator())), dev_assets=True))
+                dev = TestServer(build_app(AppState(SimpleNamespace(name="sensevoice-int8"), TranslationPipeline(MockTranslator())), dev_assets=True))
                 await dev.start_server()
                 try:
                     async with self.client.get(dev.make_url('/static/key.local.js')) as response:

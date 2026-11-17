@@ -1,19 +1,24 @@
-"""SenseVoice ASR wrapper (sherpa-onnx, CPU, int8).
-
-The model is the official SenseVoiceSmall int8 ONNX export. Japanese is one of
-the languages it was trained on; we pin ``language="ja"`` to avoid the
-auto-detect step drifting on short clips.
-"""
+"""Local CPU ASR backends using sherpa-onnx's int8 ONNX exports."""
 from __future__ import annotations
 
 import os
 import threading
 from pathlib import Path
+from typing import Protocol
 
 import numpy as np
 import sherpa_onnx
 
 SAMPLE_RATE = 16000
+
+
+class Recognizer(Protocol):
+    name: str
+    model_dir: str
+    partial_interval: float
+    min_partial_speech: float
+
+    def transcribe(self, audio: np.ndarray) -> str: ...
 
 
 def _candidate_dirs() -> list[Path]:
@@ -32,9 +37,9 @@ def _candidate_dirs() -> list[Path]:
 def resolve_model_dir(explicit: str | None = None) -> str:
     if explicit:
         p = Path(explicit)
-        if (p / "model.int8.onnx").exists():
+        if (p / "model.int8.onnx").is_file() and (p / "tokens.txt").is_file():
             return str(p)
-        raise FileNotFoundError(f"model.int8.onnx not found under {p}")
+        raise FileNotFoundError(f"SenseVoice requires model.int8.onnx + tokens.txt under {p}")
     for d in _candidate_dirs():
         if (d / "model.int8.onnx").exists() and (d / "tokens.txt").exists():
             return str(d)
@@ -42,6 +47,31 @@ def resolve_model_dir(explicit: str | None = None) -> str:
         "SenseVoice model not found. Put model.int8.onnx + tokens.txt in "
         f"{Path(__file__).resolve().parent.parent / 'models' / 'sensevoice-onnx'} "
         "or set JLSUBS_MODEL_DIR."
+    )
+
+
+def resolve_whisper_model(explicit: str | None = None) -> tuple[Path, str]:
+    """Resolve one matching multilingual encoder/decoder/tokens int8 set."""
+    root = Path(__file__).resolve().parent.parent
+    configured = explicit or os.environ.get("JLSUBS_WHISPER_MODEL_DIR")
+    directories = [Path(configured)] if configured else [root / "models" / "whisper-base"]
+    for directory in directories:
+        prefixes = [p.name.removesuffix("-encoder.int8.onnx")
+                    for p in directory.glob("*-encoder.int8.onnx") if p.is_file()]
+        complete = [prefix for prefix in prefixes
+                    if (directory / f"{prefix}-decoder.int8.onnx").is_file()
+                    and (directory / f"{prefix}-tokens.txt").is_file()]
+        if len(complete) > 1:
+            raise ValueError(f"Multiple Whisper models under {directory}; use a separate directory for each model")
+        if complete:
+            prefix = complete[0]
+            if prefix.endswith(".en"):
+                raise ValueError("English-only Whisper models cannot recognize Japanese; download a multilingual model")
+            return directory, prefix
+    raise FileNotFoundError(
+        f"Whisper model not found under {directories[0]}. Requires matching "
+        "<size>-encoder.int8.onnx, <size>-decoder.int8.onnx and <size>-tokens.txt "
+        "from sherpa-onnx. Use --model-dir or JLSUBS_WHISPER_MODEL_DIR."
     )
 
 
@@ -77,8 +107,26 @@ def resample_to_16k(audio: np.ndarray, sr: int) -> np.ndarray:
     return np.interp(x_new, x_old, audio).astype(np.float32)
 
 
-class SenseVoiceRecognizer:
+class _OfflineRecognizer:
+    """Serialize native inference across sessions sharing one model."""
+
+    def transcribe(self, audio: np.ndarray) -> str:
+        audio = np.ascontiguousarray(audio, dtype=np.float32)
+        if audio.size < SAMPLE_RATE * 0.2:
+            return ""
+        with self._lock:
+            stream = self._rec.create_stream()
+            stream.accept_waveform(SAMPLE_RATE, audio)
+            self._rec.decode_stream(stream)
+            return (stream.result.text or "").strip()
+
+
+class SenseVoiceRecognizer(_OfflineRecognizer):
     """Thin, thread-safe wrapper around sherpa-onnx SenseVoiceSmall."""
+
+    name = "sensevoice-int8"
+    partial_interval = 0.6
+    min_partial_speech = 0.9
 
     def __init__(self, model_dir: str | None = None, language: str = "ja", num_threads: int = 4):
         model_dir = resolve_model_dir(model_dir)
@@ -94,15 +142,39 @@ class SenseVoiceRecognizer:
             debug=False,
         )
 
-    def transcribe(self, audio: np.ndarray) -> str:
-        audio = np.ascontiguousarray(audio, dtype=np.float32)
-        if audio.size < SAMPLE_RATE * 0.2:
-            return ""
-        with self._lock:
-            stream = self._rec.create_stream()
-            stream.accept_waveform(SAMPLE_RATE, audio)
-            self._rec.decode_stream(stream)
-            return (stream.result.text or "").strip()
+
+class WhisperRecognizer(_OfflineRecognizer):
+    """Whisper transcribes Japanese; the existing translator produces Chinese."""
+
+    partial_interval = 2.0
+    min_partial_speech = 2.0
+
+    def __init__(self, model_dir: str | None = None, language: str = "ja", num_threads: int = 4):
+        directory, prefix = resolve_whisper_model(model_dir)
+        self.model_dir = str(directory)
+        self.name = f"whisper-{prefix}-int8"
+        self.language = language
+        self._lock = threading.Lock()
+        self._rec = sherpa_onnx.OfflineRecognizer.from_whisper(
+            encoder=str(directory / f"{prefix}-encoder.int8.onnx"),
+            decoder=str(directory / f"{prefix}-decoder.int8.onnx"),
+            tokens=str(directory / f"{prefix}-tokens.txt"),
+            language="" if language == "auto" else language,
+            task="transcribe",
+            num_threads=num_threads,
+            provider="cpu",
+            debug=False,
+        )
+
+
+def create_recognizer(engine: str = "sensevoice", model_dir: str | None = None,
+                      language: str = "ja", num_threads: int = 4) -> Recognizer:
+    if num_threads < 1:
+        raise ValueError("ASR threads must be at least 1")
+    backends = {"sensevoice": SenseVoiceRecognizer, "whisper": WhisperRecognizer}
+    if engine not in backends:
+        raise ValueError(f"Unknown ASR backend: {engine}")
+    return backends[engine](model_dir=model_dir, language=language, num_threads=num_threads)
 
 
 class SileroVad:

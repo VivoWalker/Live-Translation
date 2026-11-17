@@ -13,7 +13,7 @@
 | 模式 | 需要本地程序 | 识别 | 翻译 | 适用 |
 | --- | --- | --- | --- | --- |
 | **浏览器内（默认）** | 不需要，装扩展即可 | SenseVoiceSmall int8，WASM，跑在扩展的 offscreen 页 | 扩展直接调 DeepSeek | 日常使用 |
-| 本地服务 | 要开 `python -m server.app` | 同上模型，ONNX Runtime，多线程 | 服务端调 DeepSeek | 追求更低 ASR 延迟 / 调试 |
+| 本地服务 | 要开 `python -m server.app` | SenseVoice（默认）或 Whisper int8，ONNX Runtime，多线程 | 服务端调 DeepSeek | 更低 ASR 延迟 / 试用 Whisper / 调试 |
 
 两条路产出完全一样的事件流，字幕层（两行滚动）和翻译提示词共用一套逻辑。
 
@@ -85,6 +85,38 @@ copy config.example.json config.local.json   # 填 deepseek_api_key
 Linux/macOS 可用 `.venv/bin/python -m pip` 安装，随后运行 `.venv/bin/python -m server.app`。服务默认只接受本机 Host、同源网页或 Chrome 扩展来源，所有 WebSocket 客户端都必须认证。需要额外 HTTP 主机名时显式传入 `--allow-host example.com`；远程使用应部署 HTTPS，不要把原始服务端口直接公开。
 
 生产启动只公开演示页所需静态资源。调试 `engine-test.html`、扩展资产等需要显式加 `--dev-assets`；`key.local.js` 始终不会通过 HTTP 提供。浏览器模型下载和缓存都验证固定 SHA-256，更新模型时必须同步审核并更新摘要。
+
+### 3.3 试用 Whisper（本地服务，实验性）
+
+Whisper 复用已有的 sherpa-onnx，支持 CPU 推理，无需安装 PyTorch、faster-whisper 或额外的运行依赖。默认识别器仍为 SenseVoice；扩展选择「本地服务」后使用服务启动时指定的识别器。
+
+先按 3.2 安装 Python 依赖，再下载多语言 **base int8** 和 Silero VAD（不需要 SenseVoice 权重）：
+
+```powershell
+python tools/download_whisper.py
+python -m server.app --asr whisper --threads 2
+```
+
+请在已激活的 `.venv` 中执行；也可直接使用 `.venv\Scripts\python`（Windows）或 `.venv/bin/python`（Linux/macOS）。脚本从 sherpa-onnx 官方 GitHub Release 下载约 **198 MiB** 压缩包，只保留约 **153 MiB** 的 int8 编码器、解码器和词表。模型、压缩包和 VAD 均校验代码中固定的 SHA-256；再次运行会校验并复用已有文件。模型保存在被 Git 忽略的 `models/` 中，服务启动时不会自动下载。
+
+也可以在 `config.local.json` 写入 `"asr": "whisper"`，或设置 `JLSUBS_ASR=whisper`。自备 sherpa-onnx 的多语言 int8 模型时，通过 `--model-dir 路径` 或 `JLSUBS_WHISPER_MODEL_DIR` 指定目录，目录中需要匹配的 `<size>-encoder.int8.onnx`、`<size>-decoder.int8.onnx`、`<size>-tokens.txt`。`--model-dir` 优先于环境变量；未指定目录时查找 `models/whisper-base`。不要使用 `.en` 英语专用模型。
+
+服务固定 `language=ja`、`task=transcribe` 获取日语，再交给已有翻译器生成中文。`/health`、WebSocket `ready` 和扩展连接提示会显示实际使用的模型（例如 `whisper-base-int8`）。访问令牌、认证和音频限制与 SenseVoice 相同。
+
+Whisper 是离线识别模型；这里通过 VAD 分句并重解窗口生成预览。预览至少等待 2 秒语音、间隔至少 2 秒，解码较慢时进一步降低频率；最终字幕仍由 VAD 句尾触发。CPU 较慢或同时连接多个音源时仍可能积压，应优先减少连接数或使用 SenseVoice。
+
+用同一段音频比较识别耗时：
+
+```bash
+python tools/test_asr.py testdata/ja_nanami.mp3 --asr whisper --threads 2
+python tools/test_asr.py testdata/ja_nanami.mp3 --asr sensevoice --threads 2
+```
+
+本次云环境中，7.70 秒日语样本的 Whisper base int8 解码约 1.41 秒（RTF 0.183），SenseVoice 约 0.38 秒（RTF 0.049），均使用 2 线程。单个短样本只用于确认接入和成本，不能代表识别准确率；音乐、重叠语音和长时间直播仍需进一步评估。
+
+另外以实时速度发送仓库内约 50 秒的 `ja_long.wav`，前后加入静音，Whisper 输出 15 条最终字幕和 9 次预览；本地 mock 翻译器收到全部 15 条最终字幕。此测试验证音频、认证、VAD、识别和翻译调度链路，未连接真实 DeepSeek API。
+
+真实 Chromium 演示页的 AudioWorklet → WebSocket → Whisper → 字幕显示也已跑通。不过分句后的短音频中观察到「午後」被识别成「5個」，因此本次接入保持实验性，不作为默认模型替换。
 
 ## 4. 字幕为什么不会「跳」
 
@@ -174,4 +206,4 @@ JLS_CHROME=/path/to/chrome node tools/cache_check.mjs --model-dir /path/to/sense
 
 ## 9. 许可
 
-SenseVoice（FunAudioLLM，Apache-2.0）、sherpa-onnx（Apache-2.0）、Silero VAD（MIT）、DeepSeek API 按其服务条款。WASM 运行时来自 sherpa-onnx 官方构建。
+SenseVoice（FunAudioLLM，Apache-2.0）、Whisper（OpenAI，MIT）、sherpa-onnx（Apache-2.0）、Silero VAD（MIT）、DeepSeek API 按其服务条款。WASM 运行时来自 sherpa-onnx 官方构建。
