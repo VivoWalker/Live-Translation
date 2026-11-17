@@ -15,6 +15,7 @@ const serverField = $('server-field');
 const tokenField = $('token-field');
 const tokenEl = $('server-token');
 const cacheStatusEl = $('model-cache-status');
+const domainEl = $('asr-domain');
 
 let activeTab = null;
 let running = false;
@@ -47,6 +48,7 @@ function syncEngineFields() {
   serverField.hidden = browser;
   tokenField.hidden = browser;
   cacheStatusEl.hidden = !browser;
+  $('asr-domain-field').hidden = !browser;
 }
 
 function showModelCache(info) {
@@ -92,12 +94,13 @@ async function init() {
   activeTab = tab || null;
   $('tab-title').textContent = tab ? (tab.title || tab.url || '当前标签页') : '没有可用标签页';
 
-  const store = await chrome.storage.local.get(['jlsTarget', 'jlsServer', 'jlsEngine', 'jlsApiKey', 'jlsServerToken', 'jlsModelCache']);
+  const store = await chrome.storage.local.get(['jlsTarget', 'jlsServer', 'jlsEngine', 'jlsApiKey', 'jlsServerToken', 'jlsModelCache', 'jlsAsrDomain']);
   targetEl.value = store.jlsTarget || 'zh';
   serverEl.value = store.jlsServer || DEFAULT_SERVER;
   engineEl.value = store.jlsEngine || 'browser';
   apiKeyEl.value = store.jlsApiKey || '';
   tokenEl.value = store.jlsServerToken || '';
+  domainEl.value = ['off', 'anime', 'gakumas'].includes(store.jlsAsrDomain) ? store.jlsAsrDomain : 'gakumas';
   showModelCache(store.jlsModelCache);
   syncEngineFields();
 
@@ -121,6 +124,7 @@ async function init() {
   });
   apiKeyEl.addEventListener('change', () => chrome.storage.local.set({ jlsApiKey: apiKeyEl.value.trim() }));
   tokenEl.addEventListener('change', () => chrome.storage.local.set({ jlsServerToken: tokenEl.value.trim() }));
+  domainEl.addEventListener('change', () => chrome.storage.local.set({ jlsAsrDomain: domainEl.value }));
 }
 
 btnStart.addEventListener('click', async () => {
@@ -149,7 +153,7 @@ btnStart.addEventListener('click', async () => {
     setStatus('请填写服务启动时显示的访问令牌', true);
     return;
   }
-  chrome.storage.local.set({ jlsEngine: engineEl.value, jlsApiKey: apiKeyEl.value.trim(), jlsTarget: targetEl.value });
+  chrome.storage.local.set({ jlsEngine: engineEl.value, jlsApiKey: apiKeyEl.value.trim(), jlsTarget: targetEl.value, jlsAsrDomain: domainEl.value });
 
   btnStart.disabled = true;
   setStatus('正在开始…');
@@ -167,6 +171,7 @@ btnStart.addEventListener('click', async () => {
       engine: engineEl.value,
       apiKey: apiKeyEl.value.trim(),
       serverToken: tokenEl.value.trim(),
+      asrDomain: domainEl.value,
     });
     if (!r || !r.ok) throw new Error((r && r.error) || '启动失败');
     setRunning(true);

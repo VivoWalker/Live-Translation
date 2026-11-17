@@ -28,11 +28,15 @@ def main() -> int:
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--itn", action="store_true", default=True)
     ap.add_argument("--model-dir", default=None)
+    ap.add_argument("--asr-domain", choices=("off", "anime", "gakumas"), default="gakumas")
+    ap.add_argument("--asr-terms", default=None, help="Custom lexicon JSON")
     args = ap.parse_args()
 
     t0 = time.perf_counter()
-    asr = create_recognizer(args.asr, model_dir=args.model_dir, language=args.language, num_threads=args.threads)
+    asr = create_recognizer(args.asr, model_dir=args.model_dir, language=args.language, num_threads=args.threads,
+                            asr_domain=args.asr_domain, asr_terms=args.asr_terms)
     print(f"model: {asr.name} ({asr.model_dir})")
+    print(f"ASR spelling lexicon: {args.asr_domain} (not acoustic-model fine-tuning)")
     print(f"init: {time.perf_counter() - t0:.2f}s")
 
     for path in args.files:

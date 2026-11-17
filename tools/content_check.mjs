@@ -16,6 +16,8 @@ const SRC = ['caption-overlay.js', 'content.js'].map(name => readFileSync(resolv
 const SHOTS = process.argv.includes('--shot-dir') ? process.argv[process.argv.indexOf('--shot-dir') + 1] : null;
 const STRESS = process.argv.includes('--stress');
 const RESTART = process.argv.includes('--wasm');
+const restartCycles = process.argv.includes('--wasm-cycles') ? Number(process.argv[process.argv.indexOf('--wasm-cycles') + 1]) : 24;
+assert(Number.isInteger(restartCycles) && restartCycles >= 2 && restartCycles <= 1000, '--wasm-cycles must be between 2 and 1000');
 const CONTINUOUS = process.argv.includes('--continuous');
 const WASM = RESTART || CONTINUOUS;
 const REPORT = process.argv.includes('--report') ? process.argv[process.argv.indexOf('--report') + 1] : null;
@@ -24,6 +26,8 @@ const modelRoot = existsSync(resolve('models/sensevoice-onnx/model.int8.onnx')) 
   : join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'speech-to-text/sensevoice/models');
 const files = new Map([
   ['/ext-assets/asr-engine.js', resolve('extension/asr-engine.js')],
+  ['/ext-assets/asr-domain.js', resolve('extension/asr-domain.js')],
+  ['/ext-assets/asr-terms.json', resolve('extension/asr-terms.json')],
   ['/models/model.int8.onnx', join(modelRoot, 'sensevoice-onnx/model.int8.onnx')],
   ['/models/tokens.txt', join(modelRoot, 'sensevoice-onnx/tokens.txt')],
   ['/models/silero_vad.onnx', join(modelRoot, 'silero/silero_vad.onnx')],
@@ -130,7 +134,7 @@ async function stressRealWasm() {
     URL.createObjectURL=blob=>{const url=create(blob);__liveBlobURLs.add(url);return url};
     URL.revokeObjectURL=url=>{__liveBlobURLs.delete(url);revoke(url)};
     window.fetch=(input,init)=>{const url=String(input);
-      if(url==='https://api.deepseek.com/chat/completions')return Promise.resolve(new Response(JSON.stringify({choices:[{message:{content:'本地翻译样本'}}]}),{headers:{'Content-Type':'application/json'}}));
+      if(url==='https://api.deepseek.com/chat/completions')return Promise.resolve(new Response(JSON.stringify({choices:[{finish_reason:'stop',message:{content:'本地翻译样本'}}]}),{headers:{'Content-Type':'application/json'}}));
       if(url.startsWith('https://huggingface.co/')&&url.endsWith('/model.int8.onnx'))return __realFetch('/models/model.int8.onnx');
       if(url.startsWith('https://huggingface.co/')&&url.endsWith('/tokens.txt'))return __realFetch('/models/tokens.txt');
       if(url.startsWith('https://github.com/')&&url.endsWith('/silero_vad.onnx'))return __realFetch('/models/silero_vad.onnx');
@@ -148,7 +152,7 @@ async function stressRealWasm() {
       await new Promise(r=>setTimeout(r,50));const stats=JLSEngine.stats();if(restart)JLSEngine.stop();
       return{...__engineCounts,audioSeconds:stats.audio_seconds,decodes:stats.decodes,wasmBytes:Module.HEAPU8.byteLength,blobURLs:__liveBlobURLs.size,loaderScripts:document.scripts.length};
     }})()`, 120000);
-  for (let cycle = 0; cycle < (RESTART ? 24 : 0); cycle++) {
+  for (let cycle = 0; cycle < (RESTART ? restartCycles : 0); cycle++) {
     const result = await evaluate('__realEngineCycle()', 120000);
     assert(result.finals > 0 && result.translations === result.finals, 'real WASM did not complete audio/translation');
     assert.equal(result.blobURLs, 0, 'model object URL remains registered');
@@ -163,7 +167,7 @@ async function stressRealWasm() {
     assert(last.wasmBytes - first.wasmBytes <= 32 * 1024 * 1024, 'native WASM allocations continue growing after warmup');
     assert(last.heapBytes - first.heapBytes <= 2 * 1024 * 1024, 'WASM wrapper heap continues growing');
     assert(last.nodes <= first.nodes + 8 && last.jsEventListeners <= first.jsEventListeners + 2, 'WASM loader DOM/listeners remain retained');
-    checks.push('real SenseVoice WASM completes 24 start/decode/stop cycles with released model URLs and stable post-warmup memory');
+    checks.push(`real SenseVoice WASM completes ${restartCycles} start/decode/stop cycles with released model URLs and stable post-warmup memory`);
   }
   if (CONTINUOUS) {
     await evaluate('__startRealEngine()', 120000);
@@ -236,6 +240,17 @@ try {
   assert(await evaluate(`cap('.rows').scrollTop>0`));
   await evaluate(`window.__jlsListener({type:'jls:clear'},{},()=>{})`); await move(1, 1);
   checks.push('row promotion and height animation preserve fixed text width without a scrollbar; wheel scrolling still works');
+  const orderedText = '前一句译文比较长，需要足够的阅读时间。';
+  await sleep(200);
+  await evaluate(`final(300,'前の長い句です。',${JSON.stringify(orderedText)});final(301,'はい。','好。')`);
+  const orderedDuration = await evaluate(`JLS.captionReadingTime(${JSON.stringify(orderedText)})`);
+  await sleep(orderedDuration + 100);
+  assert.equal(await evaluate(`!!cap('.rows .row[data-id="300"]:not([aria-hidden])')`), false);
+  assert.equal(await evaluate(`!!cap('.rows .row[data-id="301"]:not([aria-hidden])')`), true);
+  await sleep(650);
+  assert.equal(await evaluate(`!!cap('.rows .row[data-id="301"]:not([aria-hidden])')`), false);
+  await evaluate(`window.__jlsListener({type:'jls:clear'},{},()=>{})`);
+  checks.push('the earlier long translation exits before the later short translation');
   await evaluate(`final(1,'今日は、山の向こうにある小さな町まで歩いてみようと思います。','今天想慢慢走到山那边的小镇，沿途看看河流和树林，也给自己留一点不赶时间的余地。');
     final(2,'いいですね。','听起来很好。');final(3,'行きましょう。','那就出发吧。');`);
   await sleep(500);

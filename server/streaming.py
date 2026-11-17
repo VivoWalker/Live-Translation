@@ -66,7 +66,7 @@ class StreamSession:
         config: SessionConfig | None = None,
     ):
         self.asr = asr
-        self.translator = translator
+        self.translator = translator.new_session() if isinstance(translator, TranslationPipeline) else translator
         self.on_event = on_event
         self.cfg = config or SessionConfig()
         self.vad = SileroVad()
@@ -91,6 +91,9 @@ class StreamSession:
         self._last_decode_ms = 0.0
         self._translate_task: asyncio.Task | None = None
         self._translate_seg_id: int | None = None
+        self._translate_job = None
+        self.translation_epoch = 0
+        self._delivered_id = -1
         self._task: asyncio.Task | None = None
         self._closed = False
 
@@ -123,6 +126,10 @@ class StreamSession:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if isinstance(self.translator, TranslationPipeline):
+            await self.translator.close()
+        self._translate_task = self._translate_job = self._translate_seg_id = None
+        self._final_context = ""
         while not self._q.empty():
             self._q.get_nowait()
         self._queued_bytes = 0
@@ -181,13 +188,37 @@ class StreamSession:
         self.stats.decode_ms += elapsed
         return normalize_ja(text)
 
-    async def _translate(self, seg_id: int, text: str, final: bool) -> None:
+    async def set_target(self, target: str) -> None:
+        if target == self.cfg.target_lang:
+            return
+        previous = self._translate_task
+        self.cfg.target_lang = target
+        self.translation_epoch += 1
+        if isinstance(self.translator, TranslationPipeline):
+            self.translator.reset()
+        self._final_context = ""
+        self._delivered_id = -1
+        self._translate_job = None
+        # Reset synchronously before waiting: the audio worker may schedule a
+        # new final segment while the previous delivery finishes cancellation.
+        if previous and not previous.done():
+            previous.cancel()
+            await asyncio.gather(previous, return_exceptions=True)
+
+    def translation_stats(self) -> dict:
+        return self.translator.snapshot() if isinstance(self.translator, TranslationPipeline) else {}
+
+    async def _translate(self, seg_id: int, text: str, final: bool, target: str, context: str, epoch: int) -> None:
         t0 = time.perf_counter()
         try:
-            tr = await self.translator.translate(text, self.cfg.target_lang, context=self._final_context)
+            tr = await self.translator.translate(text, target, context=context)
         except Exception as e:  # noqa: BLE001 - a failed translation must not kill the stream
-            self._emit({"type": "error", "scope": "translate", "message": str(e)[:300], "id": seg_id})
+            if not self._closed and epoch == self.translation_epoch:
+                self._emit({"type": "error", "scope": "translate", "message": str(e)[:300], "id": seg_id})
             return
+        if self._closed or epoch != self.translation_epoch or seg_id <= self._delivered_id:
+            return
+        self._delivered_id = seg_id
         self.stats.translations += 1
         self.stats.translate_ms += (time.perf_counter() - t0) * 1000
         if final and tr.text:
@@ -200,18 +231,27 @@ class StreamSession:
                 "text": tr.text,
                 "engine": tr.engine,
                 "ms": tr.ms,
+                "source": tr.source,
             }
         )
 
     def _schedule_translation(self, seg_id: int, text: str, final: bool) -> None:
-        running = self._translate_task and not self._translate_task.done()
-        if running and not final:
+        if not final or self._closed or seg_id <= self._delivered_id:
             return
-        if running:
-            self._translate_task.cancel()
-            self._emit({"type": "translation_cancelled", "id": self._translate_seg_id})
+        target, context, epoch = self.cfg.target_lang, self._final_context, self.translation_epoch
+        job = (seg_id, text, target, context, epoch)
+        running = self._translate_task and not self._translate_task.done()
+        if running and self._translate_job == job:
+            return
+        previous, previous_id = self._translate_task, self._translate_seg_id
+        self._translate_job = job
         self._translate_seg_id = seg_id
-        self._translate_task = asyncio.create_task(self._translate(seg_id, text, final))
+        # Attach a new consumer before cancelling the superseded delivery. An
+        # identical request can then keep its transport alive for that consumer.
+        self._translate_task = asyncio.create_task(self._translate(seg_id, text, final, target, context, epoch))
+        if running:
+            previous.cancel()
+            self._emit({"type": "translation_cancelled", "id": previous_id})
 
     async def _emit_partial(self) -> None:
         end = self._total

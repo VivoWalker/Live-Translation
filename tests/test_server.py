@@ -96,9 +96,9 @@ class DeepSeekClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(req["body"]["stream"], False)
         self.assertEqual(req["body"]["messages"][0]["role"], "system")
         self.assertIn("字幕", req["body"]["messages"][0]["content"])
-        # Context is a system-level hint, never mixed into the text to translate.
-        self.assertIn("上一句", req["body"]["messages"][0]["content"])
-        self.assertEqual(req["body"]["messages"][1]["content"], "今日は東京の天気についてお話しします。")
+        # Dynamic dialogue is an explicitly labelled user JSON, outside the fixed prefix.
+        self.assertNotIn("こんにちは。", req["body"]["messages"][0]["content"])
+        self.assertEqual(json.loads(req["body"]["messages"][1]["content"]), {"previous": "こんにちは。", "current": "今日は東京の天気についてお話しします。"})
 
     async def test_error_is_retried_then_raised(self):
         self.fake.status = 500

@@ -118,10 +118,10 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
             await ws.close(code=1008, message=b"Access token required")
             return ws
 
-        out: asyncio.Queue[dict] = asyncio.Queue(maxsize=64)
+        out: asyncio.Queue[tuple[int, dict]] = asyncio.Queue(maxsize=64)
         def on_event(event):
             if not out.full():
-                out.put_nowait(event)
+                out.put_nowait((session.translation_epoch if session else 0, event))
 
         cfg = SessionConfig()
         session = StreamSession(state.asr, state.translator, on_event, cfg)
@@ -129,7 +129,9 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
         state.sessions += 1
         async def writer():
             while True:
-                await ws.send_json(await out.get())
+                epoch, event = await out.get()
+                if epoch == session.translation_epoch:
+                    await ws.send_json(event)
         writer_task = asyncio.create_task(writer())
         await ws.send_json({"type": "ready", "asr": state.asr.name, "translator": state.engine, "source": "ja", "target": "zh"})
         audio_budget = RateBudget(128000, 256000)  # Up to 2x realtime, four-second burst.
@@ -154,12 +156,12 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                         target = data.get("target", cfg.target_lang)
                         if target not in ("zh", "en"):
                             raise ValueError("Unsupported target language")
-                        session.cfg.target_lang = target
+                        await session.set_target(target)
                         await ws.send_json({"type": "config", "ok": True, "target": target})
                     elif kind == "ping":
                         await ws.send_json({"type": "pong", "t": time.time()})
                     elif kind == "stats":
-                        await ws.send_json({"type": "stats", **session.stats.as_dict()})
+                        await ws.send_json({"type": "stats", **session.stats.as_dict(), "translation": session.translation_stats()})
                 elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
                     break
             except (ValueError, TypeError):
@@ -261,18 +263,22 @@ def main() -> int:
     ap.add_argument("--asr", choices=("sensevoice", "whisper"),
                     default=os.environ.get("JLSUBS_ASR", cfg.get("asr", "sensevoice")),
                     help="Local recognition backend (default: sensevoice)")
+    ap.add_argument("--asr-domain", choices=("off", "anime", "gakumas"),
+                    default=cfg.get("asr_domain", "gakumas"), help="Local ASR spelling lexicon")
+    ap.add_argument("--asr-terms", default=cfg.get("asr_terms"), help="Custom ASR lexicon JSON, replaces built-in terms")
     ap.add_argument("--dev-assets", action="store_true", help="Expose non-secret development test pages")
     ap.add_argument("--allow-host", action="append", default=[], help="Additional trusted HTTP hostname (no scheme or port)")
     args = ap.parse_args()
 
     api_key = os.environ.get("DEEPSEEK_API_KEY") or cfg.get("deepseek_api_key")
     try:
-        asr = create_recognizer(args.asr, model_dir=args.model_dir, language="ja", num_threads=args.threads)
-    except (FileNotFoundError, ValueError) as exc:
+        asr = create_recognizer(args.asr, model_dir=args.model_dir, language="ja", num_threads=args.threads,
+                                asr_domain=args.asr_domain, asr_terms=args.asr_terms)
+    except (OSError, ValueError) as exc:
         ap.error(str(exc))
     translator = TranslationPipeline(create_translator(args.translator, api_key))
     state = AppState(asr, translator, access_token=os.environ.get("JLSUBS_ACCESS_TOKEN") or cfg.get("access_token"), allowed_hosts=LOCAL_HOSTS | set(args.allow_host))
-    print(f"[jls] asr={asr.name} threads={args.threads} translator={translator.engine}")
+    print(f"[jls] asr={asr.name} threads={args.threads} asr_domain={args.asr_domain} translator={translator.engine}")
     if translator.engine == "deepseek":
         print(f"[jls] deepseek model={os.environ.get('DEEPSEEK_MODEL', 'deepseek-chat')}")
     elif translator.engine == "google-public":

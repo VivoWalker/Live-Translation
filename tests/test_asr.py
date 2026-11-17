@@ -76,7 +76,8 @@ class BackendTests(unittest.TestCase):
             with self.subTest(engine=engine), patch(f"server.asr.{constructor}") as factory:
                 result = create_recognizer(**({} if engine == "sensevoice" else {"engine": engine}))
                 self.assertIs(result, factory.return_value)
-                factory.assert_called_once_with(model_dir=None, language="ja", num_threads=4)
+                factory.assert_called_once_with(model_dir=None, language="ja", num_threads=4,
+                                                asr_domain="gakumas", asr_terms=None)
         with self.assertRaisesRegex(ValueError, "Unknown ASR"):
             create_recognizer("unknown")
         with self.assertRaisesRegex(ValueError, "at least 1"):

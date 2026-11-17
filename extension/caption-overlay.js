@@ -72,9 +72,10 @@
     }
     beginReading(entry) {
       entry.shownAt = this.now();
-      entry.deadline = entry.zh || entry.failed
+      entry.readUntil = entry.zh || entry.failed
         ? entry.shownAt + readingTime(entry.zh || entry.ja, this.cps)
         : entry.shownAt + 60000; // Beyond the translator's retries; never block a slot forever.
+      entry.deadline = entry.readUntil;
     }
     translation(id, text, final = true) {
       if (!text || final === false) return;
@@ -118,6 +119,13 @@
         old.retired = true;
         this.entries.delete(old.id);
       }
+      let previousDeadline = -Infinity;
+      for (const entry of this.visible) {
+        // Each sentence gets its own minimum reading time, but departures stay
+        // in spoken order with enough separation for the preceding exit motion.
+        entry.deadline = Math.max(entry.readUntil, entry.notBefore ?? -Infinity, previousDeadline + 600);
+        previousDeadline = entry.deadline;
+      }
       this.onChange();
       const deadlines = this.visible.map(entry => entry.deadline).filter(Number.isFinite);
       if (this.pauseAt === null && deadlines.length) {
@@ -128,12 +136,15 @@
     tick() {
       if (this.pauseAt !== null) return;
       const now = this.now();
-      this.visible = this.visible.filter(entry => {
-        if (entry.deadline > now) return true;
-        if (!entry.zh && !entry.failed) { entry.failed = true; this.beginReading(entry); return true; }
-        entry.retired = true;
-        return false;
-      });
+      const first = this.visible[0];
+      if (first && first.deadline <= now) {
+        if (!first.zh && !first.failed) { first.failed = true; this.beginReading(first); }
+        else {
+          first.retired = true; this.visible.shift();
+          this.fill();
+          if (this.visible[0]) this.visible[0].notBefore = now + 600;
+        }
+      }
       this.fill();
       this.changed();
     }
@@ -143,7 +154,8 @@
         for (const entry of this.visible) {
           if (!Number.isFinite(entry.deadline)) continue;
           const elapsed = this.now() - Math.max(this.pauseAt, entry.shownAt);
-          entry.deadline += elapsed; entry.shownAt += elapsed;
+          entry.readUntil += elapsed; entry.shownAt += elapsed;
+          if (entry.notBefore !== undefined) entry.notBefore += elapsed;
         }
         this.pauseAt = null;
       }
@@ -152,7 +164,7 @@
     speed(cps) {
       this.cps = cps;
       for (const entry of this.visible) {
-        if (entry.zh || entry.failed) entry.deadline = entry.shownAt + readingTime(entry.zh || entry.ja, cps);
+        if (entry.zh || entry.failed) entry.readUntil = entry.shownAt + readingTime(entry.zh || entry.ja, cps);
       }
       this.changed();
     }
@@ -294,7 +306,7 @@
         <label class="setting">译文颜色 <input aria-label="译文颜色" data-setting="color" type="color"></label>
         <label class="setting">显示日语原文 <input data-setting="showJa" type="checkbox"></label>
         <label class="setting">阅读速度 <select data-setting="cps" aria-label="阅读速度"><option value="4">从容 · 4 字/秒</option><option value="6">标准 · 6 字/秒</option><option value="8">较快 · 8 字/秒</option><option value="10">快速 · 10 字/秒</option></select></label>
-        <p class="note">译文按长度停留 3–24 秒。悬停时暂停计时；离开后背景淡出，文字保持清晰。</p>
+        <p class="note">按长度留出 3–24 秒阅读，并按先后顺序退场。悬停时暂停计时；离开后背景淡出，文字保持清晰。</p>
         <button class="reset" type="button">恢复默认样式与位置</button>
       </div>`;
     const pill = document.createElement('div');

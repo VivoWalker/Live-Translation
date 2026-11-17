@@ -52,13 +52,162 @@
   const CACHE_KEY = 'https://jls-model-cache.invalid/sensevoice-2024-07-17.data';
   const LEGACY_CACHE_KEY = '/sensevoice-package.data';
   const PROMPTS = {
-    zh:
-      '你是专业的日语影视字幕翻译。把用户给出的日语台词翻译成自然、口语化的简体中文，符合字幕阅读习惯。' +
-      '只输出译文本身：不要解释，不要加引号，不要附日语原文，不要加“译文：”之类的前缀。',
-    en:
-      'You translate Japanese dialogue into natural conversational English subtitles. ' +
-      'Output only the translation: no notes, no quotes, no Japanese source text.',
+    "zh": "你是专业的日语影视字幕翻译。把用户消息 JSON 中 current 字段的日语台词翻译成自然、口语化的简体中文，符合字幕阅读习惯。previous 字段只用于理解指代和语气，不要翻译、复述或合并上一句；只翻译 current。只输出译文本身：不要解释，不要加引号，不要附日语原文，不要加“译文：”之类的前缀。人名、语气词、省略号和停顿要保留。",
+    "en": "You translate Japanese dialogue in the current field of the user JSON into natural conversational English subtitles. Use the previous field only to understand references and tone. Do not translate, repeat or merge the previous sentence; translate current only. Output only the translation: no notes, no quotes, no Japanese source text. Preserve names, tone, ellipses and pauses."
   };
+
+  const PROMPT_VERSION = 'subtitle-v2';
+  const CACHE_LIMIT = 500, CACHE_BYTES = 1024 * 1024, ENTRY_BYTES = 32768, MAX_INFLIGHT = 32;
+  const USAGE_FIELDS = ['prompt_cache_hit_tokens', 'prompt_cache_miss_tokens', 'completion_tokens'];
+  const encoder = new TextEncoder();
+  let translationModel = 'deepseek-chat', translationBase = 'https://api.deepseek.com';
+  let promptVersion = PROMPT_VERSION, temperature = 0.2, maxTokens = 512;
+  let translationEpoch = 0;
+  function freshTranslationState() {
+    return { cache: new Map(), bytes: 0, inflight: new Map(), deliveries: new Map(), delivered: new Map(), contextId: -1,
+      api: 0, completed: 0, hits: 0, merged: 0, ms: 0,
+      tokens: Object.fromEntries(USAGE_FIELDS.map(k => [k, 0])),
+      reported: Object.fromEntries(USAGE_FIELDS.map(k => [k, 0])),
+      missing: Object.fromEntries(USAGE_FIELDS.map(k => [k, 0])) };
+  }
+  let translationState = freshTranslationState();
+  let asrDomain = 'gakumas', domainData = null, domainCorrector = null, domainPromise = null;
+  async function loadDomain() {
+    if (!domainPromise) domainPromise = (async () => {
+      await loadScript(baseUrl() + 'asr-domain.js');
+      const response = await fetch(baseUrl() + 'asr-terms.json');
+      if (!response.ok) throw new Error('识别词表加载失败');
+      const raw = await response.text();
+      if (encoder.encode(raw).length > 256 * 1024) throw new Error('识别词表过大');
+      domainData = JSON.parse(raw);
+      // Validate even when disabled; subsequent mode changes stay synchronous.
+      window.JLSASRDomain.create(domainData, 'off');
+    })().catch(() => { domainPromise = null; domainData = null; throw new Error('识别词表加载失败，请重新加载扩展'); });
+    await domainPromise;
+  }
+  const add = (object, key, amount = 1) => object[key] = Math.min(Number.MAX_SAFE_INTEGER, object[key] + amount);
+  function translationStats() {
+    const s = translationState;
+    const known = Object.fromEntries(USAGE_FIELDS.map(k => [k, s.reported[k] ? s.tokens[k] : null]));
+    return { api_requests: s.api, api_requests_completed: s.completed, local_cache_hits: s.hits,
+      merged_requests: s.merged, request_ms: Math.round(s.ms * 10) / 10,
+      avg_request_ms: s.completed ? Math.round(s.ms / s.completed * 10) / 10 : null,
+      ...Object.fromEntries(USAGE_FIELDS.map(k => [k, s.missing[k] ? null : known[k]])),
+      usage_reported_tokens: known, usage_unavailable_requests: { ...s.missing },
+      usage_pending_requests: Math.max(0, s.api - s.completed),
+      cache_entries: s.cache.size, cache_bytes: s.bytes, in_flight: s.inflight.size,
+      deliveries_in_flight: s.deliveries.size, delivered_segments: s.delivered.size };
+  }
+  function finishRequest(s, ms, usage) {
+    add(s, 'completed'); add(s, 'ms', Math.max(0, ms));
+    for (const field of USAGE_FIELDS) {
+      const value = usage?.[field];
+      if (Number.isSafeInteger(value) && value >= 0) { add(s.reported, field); add(s.tokens, field, value); }
+      else add(s.missing, field);
+    }
+  }
+  function cachePut(s, key, text) {
+    const bytes = encoder.encode(JSON.stringify([key])).length + encoder.encode(text).length;
+    if (!text || bytes > ENTRY_BYTES) return;
+    if (s.cache.has(key)) { s.bytes -= s.cache.get(key).bytes; s.cache.delete(key); }
+    s.cache.set(key, { text, bytes }); s.bytes += bytes;
+    while (s.cache.size > CACHE_LIMIT || s.bytes > CACHE_BYTES) {
+      const oldest = s.cache.keys().next().value;
+      s.bytes -= s.cache.get(oldest).bytes; s.cache.delete(oldest);
+    }
+  }
+  function resetTranslationState() {
+    ++translationEpoch;
+    for (const controller of pendingRequests) controller.abort();
+    pendingRequests.clear();
+    for (const timer of timers) clearTimeout(timer);
+    timers.clear();
+    translationState.cache.clear(); translationState.inflight.clear();
+    translationState.deliveries.clear(); translationState.delivered.clear();
+    translationState = freshTranslationState();
+    finalContext = '';
+  }
+  function requestSnapshot(text) {
+    const context = finalContext;
+    const target = targetLang;
+    const payload = { model: translationModel,
+      messages: [ { role: 'system', content: PROMPTS[target] || PROMPTS.zh },
+        { role: 'user', content: JSON.stringify({ previous: context, current: text }) } ],
+      temperature, max_tokens: maxTokens, stream: false };
+    const endpoint = translationBase.replace(/\/+$/, '') + '/chat/completions';
+    return { endpoint, payload, text, target, context, apiKey,
+      key: JSON.stringify([endpoint, promptVersion, target, payload]) };
+  }
+  function validTranslation(epoch, state) { return epoch === translationEpoch && state === translationState; }
+  function abortable(promise, signal) {
+    return new Promise((resolve, reject) => {
+      const cancelled = () => reject(new DOMException('cancelled', 'AbortError'));
+      if (signal.aborted) cancelled();
+      else signal.addEventListener('abort', cancelled, { once: true });
+      Promise.resolve(promise).then(value => { signal.removeEventListener('abort', cancelled); resolve(value); },
+        error => { signal.removeEventListener('abort', cancelled); reject(error); });
+    });
+  }
+  async function performRequest(snapshot, state, epoch, record) {
+    let started, usage;
+    const controller = record.controller;
+    let timeout;
+    try {
+      if (!validTranslation(epoch, state) || controller.signal.aborted) throw new DOMException('cancelled', 'AbortError');
+      started = performance.now(); add(state, 'api');
+      timeout = setTimeout(() => controller.abort(), 12000);
+      const response = await abortable(fetch(snapshot.endpoint, { method: 'POST', signal: controller.signal,
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + snapshot.apiKey },
+        body: JSON.stringify(snapshot.payload) }), controller.signal);
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const data = await abortable(response.json(), controller.signal); usage = data?.usage;
+      const choice = Array.isArray(data?.choices) ? data.choices[0] : null, content = choice?.message?.content;
+      if (choice?.finish_reason !== 'stop' || typeof content !== 'string' || !content.trim()) throw new Error('翻译结果为空或不完整');
+      const text = content.trim().replace(/^(译文|翻译|中文)[:：]\s*/, '').trim().replace(/^["“”]+|["“”]+$/g, '').trim().replace(/\s*\n+\s*/g, ' ');
+      if (!text) throw new Error('翻译结果为空');
+      if (!validTranslation(epoch, state) || controller.signal.aborted) throw new DOMException('cancelled', 'AbortError');
+      cachePut(state, snapshot.key, text);
+      return { text, ms: Math.round(performance.now() - started), source: 'api' };
+    } finally {
+      if (started !== undefined) finishRequest(state, performance.now() - started, usage);
+      clearTimeout(timeout); pendingRequests.delete(controller);
+      if (state.inflight.get(snapshot.key) === record) state.inflight.delete(snapshot.key);
+    }
+  }
+  async function requestTranslation(snapshot, state, epoch) {
+    if (encoder.encode(snapshot.key).length > 65536) throw new Error('翻译文本过长');
+    const hit = state.cache.get(snapshot.key);
+    if (hit) {
+      state.cache.delete(snapshot.key); state.cache.set(snapshot.key, hit); add(state, 'hits');
+      return { text: hit.text, ms: 0, source: 'cache' };
+    }
+    const existing = state.inflight.get(snapshot.key);
+    if (existing) { add(state, 'merged'); return { ...await existing.promise, source: 'shared' }; }
+    if (state.inflight.size >= MAX_INFLIGHT) throw new Error('翻译请求过多，请稍后重试');
+    const record = { controller: new AbortController(), promise: null };
+    pendingRequests.add(record.controller);
+    record.promise = Promise.resolve().then(() => performRequest(snapshot, state, epoch, record));
+    state.inflight.set(snapshot.key, record);
+    return record.promise;
+  }
+  function setConfig(config) {
+    const string = (key, fallback) => typeof config[key] === 'string' ? config[key] : fallback;
+    const next = { target: string('target', targetLang), apiKey: string('apiKey', apiKey),
+      asrDomain: string('asrDomain', asrDomain),
+      model: string('model', translationModel), baseUrl: string('baseUrl', translationBase),
+      promptVersion: string('promptVersion', promptVersion),
+      temperature: Number.isFinite(config.temperature) ? config.temperature : temperature,
+      maxTokens: Number.isSafeInteger(config.maxTokens) && config.maxTokens > 0 ? config.maxTokens : maxTokens };
+    if (!['off', 'anime', 'gakumas'].includes(next.asrDomain)) throw new Error('未知的识别词表');
+    const changed = next.asrDomain !== asrDomain || next.target !== targetLang || next.apiKey !== apiKey || next.model !== translationModel ||
+      next.baseUrl !== translationBase || next.promptVersion !== promptVersion || next.temperature !== temperature || next.maxTokens !== maxTokens;
+    if (!changed) return;
+    resetTranslationState();
+    targetLang = next.target; apiKey = next.apiKey; translationModel = next.model; translationBase = next.baseUrl;
+    promptVersion = next.promptVersion; temperature = next.temperature; maxTokens = next.maxTokens;
+    asrDomain = next.asrDomain;
+    if (domainData) domainCorrector = window.JLSASRDomain.create(domainData, asrDomain);
+  }
 
   let recognizer = null;
   let vad = null;
@@ -224,52 +373,32 @@
   }
 
   // ------------------------------------------------------------ translation
-  async function translate(id, text, isFinal, epoch) {
-    if (epoch !== generation) return;
-    if (!text) return;
-    if (!apiKey) {
-      emit({ type: 'error', scope: 'translate', id, message: '未填写 DeepSeek API Key' });
-      return;
-    }
-    const controller = new AbortController();
-    pendingRequests.add(controller);
-    const timeout = setTimeout(() => controller.abort(), 12000);
-    const t0 = performance.now();
-    const base = PROMPTS[targetLang] || PROMPTS.zh;
-    const system = finalContext
-      ? base + '\n上一句字幕是「' + finalContext + '」，只用来理解指代和语气；不要翻译或复述它。'
-      : base;
-    try {
-      const resp = await fetch('https://api.deepseek.com/chat/completions', {
-        method: 'POST',
-        signal: controller.signal,
-        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + apiKey },
-        body: JSON.stringify({
-          model: 'deepseek-chat',
-          messages: [
-            { role: 'system', content: system },
-            { role: 'user', content: text },
-          ],
-          temperature: 0.2,
-          max_tokens: 512,
-          stream: false,
-        }),
-      });
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
-      const data = await resp.json();
-      if (epoch !== generation) return;
-      const out = (data.choices?.[0]?.message?.content || '').trim().replace(/^["“](.*)["”]$/, '$1');
-      const ms = Math.round(performance.now() - t0);
-      translateCount++;
-      translateMsTotal += ms;
-      if (isFinal) finalContext = text;
-      emit({ type: 'translation', id, final: isFinal, text: out, engine: 'deepseek', ms });
-    } catch (e) {
-      if (epoch === generation) emit({ type: 'error', scope: 'translate', id, message: '翻译失败：' + (e.message || e) });
-    } finally {
-      clearTimeout(timeout);
-      pendingRequests.delete(controller);
-    }
+  function translate(id, text, isFinal, epoch) {
+    if (epoch !== generation || !isFinal || !text) return Promise.resolve();
+    const state = translationState, ticket = translationEpoch;
+    if (state.delivered.has(id)) return Promise.resolve();
+    if (state.deliveries.has(id)) return state.deliveries.get(id);
+    if (state.deliveries.size >= 64) return Promise.resolve();
+    const snapshot = requestSnapshot(text);
+    const delivery = Promise.resolve().then(async () => {
+      try {
+        if (!snapshot.apiKey) throw new Error('未填写 DeepSeek API Key');
+        const result = await requestTranslation(snapshot, state, ticket);
+        if (epoch !== generation || !validTranslation(ticket, state) || state.delivered.has(id)) return;
+        state.delivered.set(id, true);
+        while (state.delivered.size > 500) state.delivered.delete(state.delivered.keys().next().value);
+        translateCount++; translateMsTotal += result.ms;
+        if (id >= state.contextId) { finalContext = snapshot.text; state.contextId = id; }
+        emit({ type: 'translation', id, final: true, text: result.text, source: result.source,
+          engine: result.source === 'cache' ? 'deepseek:cache' : 'deepseek', ms: result.ms });
+      } catch (error) {
+        const safe = ['未填写 DeepSeek API Key', '翻译结果为空或不完整', '翻译结果为空', '翻译文本过长', '翻译请求过多，请稍后重试'].includes(error.message) || /^HTTP \d+$/.test(error.message) ? error.message : '请求失败';
+        if (epoch === generation && validTranslation(ticket, state)) emit({ type: 'error', scope: 'translate', id,
+          message: error.name === 'AbortError' ? '翻译请求已取消或超时' : '翻译失败：' + safe });
+      } finally { if (state.deliveries.get(id) === delivery) state.deliveries.delete(id); }
+    });
+    state.deliveries.set(id, delivery);
+    return delivery;
   }
 
   // ------------------------------------------------------------ audio pipeline
@@ -326,7 +455,7 @@
       ? Math.min(2400, partialInterval + 300)
       : Math.max(PARTIAL_INTERVAL, partialInterval - 100);
     decodeCount++;
-    return normalizeJa(text);
+    return domainCorrector.correct(normalizeJa(text));
   }
 
   function resetSegment() {
@@ -463,9 +592,14 @@
   async function init(config) {
     stop();
     const epoch = generation;
-    targetLang = config.target || 'zh';
-    apiKey = config.apiKey || '';
+    setConfig({ target: config.target || 'zh', apiKey: config.apiKey || '', model: config.model || 'deepseek-chat',
+      asrDomain: config.asrDomain || 'gakumas',
+      baseUrl: config.baseUrl || 'https://api.deepseek.com', promptVersion: config.promptVersion || PROMPT_VERSION,
+      temperature: config.temperature ?? 0.2, maxTokens: config.maxTokens ?? 512 });
     onEvent = config.onEvent || (() => {});
+    await loadDomain();
+    if (epoch !== generation) throw new DOMException('采集已取消', 'AbortError');
+    domainCorrector = window.JLSASRDomain.create(domainData, asrDomain);
     const module = await loadRuntime(config, message => {
       if (epoch === generation) emit({ type: 'progress', message });
     });
@@ -503,7 +637,7 @@
         modelConfig: {
           debug: 0,
           tokens: '/tokens.txt',
-          senseVoice: { model: '/sense-voice.onnx', language: '', useInverseTextNormalization: 1 },
+          senseVoice: { model: '/sense-voice.onnx', language: 'ja', useInverseTextNormalization: 1 },
         },
       },
       module
@@ -518,7 +652,9 @@
       avg_decode_ms: decodeCount ? Math.round(decodeMsTotal / decodeCount) : 0,
       rtf: decodeCount ? +(decodeMsTotal / 1000 / Math.max(totalSamples / SAMPLE_RATE, 0.01)).toFixed(3) : 0,
       finals,
+      asr_domain: asrDomain,
       translations: translateCount,
+      translation: translationStats(),
       avg_translate_ms: translateCount ? Math.round(translateMsTotal / translateCount) : 0,
     };
   }
@@ -526,10 +662,7 @@
   function stop() {
     ++generation;
     started = ready = false;
-    for (const controller of pendingRequests) controller.abort();
-    pendingRequests.clear();
-    for (const timer of timers) clearTimeout(timer);
-    timers.clear();
+    resetTranslationState();
     onEvent = () => {};
     apiKey = finalContext = lastHyp = lastText = '';
     chunks.length = 0;
@@ -543,5 +676,5 @@
     recognizer = vad = null;
   }
 
-  window.JLSEngine = { init, feed, stop, stats, setConfig: (c) => { if (c.target) targetLang = c.target; if (c.apiKey) apiKey = c.apiKey; } };
+  window.JLSEngine = { init, feed, stop, stats, setConfig };
 })();
