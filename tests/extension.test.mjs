@@ -30,7 +30,7 @@ function offscreen(engine = { init: async () => {}, stop() {}, stats: () => ({})
     constructor() { this.readyState = 1; this.sent = []; sockets.push(this); queueMicrotask(() => this.onopen()); }
     send(raw) {
       this.sent.push(JSON.parse(raw));
-      if (this.sent.length === 2) queueMicrotask(() => this.onmessage({ data: JSON.stringify({ type: 'ready', translator: 'mock' }) }));
+      if (this.sent.length === 2) queueMicrotask(() => this.onmessage({ data: JSON.stringify({ type: 'ready', asr: 'whisper-base-int8', translator: 'mock' }) }));
     }
     close() { this.readyState = 3; }
   }
@@ -98,6 +98,7 @@ test('server mode authenticates and never starts the browser engine', async () =
   assert.equal((await started).ok, true);
   assert.deepEqual(context.sockets[0].sent[0], { type: 'auth', token: 'test-token' });
   assert.equal(browserStarts, 0);
+  assert.equal(context.messages.some(m => m.phase === 'connected' && m.message.includes('whisper-base-int8')), true);
   await context.send({ type: 'jls:offscreen-stop', sessionId: 'S' });
 });
 

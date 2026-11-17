@@ -56,7 +56,7 @@ function connect(capture, url, target, token) {
       try { msg = JSON.parse(e.data); } catch { return; }
       if (msg.type === 'ready' && !settled) {
         settled = true; clearTimeout(timer);
-        report(capture, 'connected', '已连接字幕服务（' + msg.translator + '）');
+        report(capture, 'connected', '已连接字幕服务（' + msg.asr + ' / ' + msg.translator + '）');
         resolve();
       }
       send(capture, msg);

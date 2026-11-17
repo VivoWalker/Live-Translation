@@ -1,4 +1,4 @@
-"""Quick offline check: SenseVoice (sherpa-onnx) on a local audio file.
+"""Quick offline check: SenseVoice or Whisper on a local audio file.
 
 Usage:
     python tools/test_asr.py testdata/ja_nanami.mp3 --language ja
@@ -17,22 +17,22 @@ import soundfile as sf
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from server.asr import SenseVoiceRecognizer, resample_to_16k, resolve_model_dir  # noqa: E402
+from server.asr import create_recognizer, resample_to_16k  # noqa: E402
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("files", nargs="+")
-    ap.add_argument("--language", default="ja", help="ja|zh|en|yue|ko|auto")
+    ap.add_argument("--language", default="ja", help="Source language code, or auto")
+    ap.add_argument("--asr", choices=("sensevoice", "whisper"), default="sensevoice")
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--itn", action="store_true", default=True)
     ap.add_argument("--model-dir", default=None)
     args = ap.parse_args()
 
-    model_dir = resolve_model_dir(args.model_dir)
-    print(f"model: {model_dir}")
     t0 = time.perf_counter()
-    asr = SenseVoiceRecognizer(model_dir=model_dir, language=args.language, num_threads=args.threads)
+    asr = create_recognizer(args.asr, model_dir=args.model_dir, language=args.language, num_threads=args.threads)
+    print(f"model: {asr.name} ({asr.model_dir})")
     print(f"init: {time.perf_counter() - t0:.2f}s")
 
     for path in args.files:
