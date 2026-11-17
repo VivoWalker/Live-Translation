@@ -114,7 +114,11 @@
         statsEl.textContent = 'RTF ' + msg.rtf + ' · 平均翻译 ' + (msg.avg_translate_ms >= 1 ? msg.avg_translate_ms + 'ms' : '缓存命中');
         break;
       case 'error':
+        if (msg.scope === 'translate') cap.translationFailed(msg.id);
         cap.setMeta('翻译失败：' + msg.message);
+        break;
+      case 'translation_cancelled':
+        cap.translationFailed(msg.id);
         break;
       default:
         break;

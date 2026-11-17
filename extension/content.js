@@ -44,8 +44,12 @@
         break;
       }
       case 'error':
+        if (ev.scope === 'translate') u.translationFailed(ev.id);
         u.show();
         u.setMeta(ev.message || '出错了', true);
+        break;
+      case 'translation_cancelled':
+        u.translationFailed(ev.id);
         break;
       default:
         break;

@@ -119,16 +119,17 @@ test('stop during engine initialization stops media and suppresses late progress
   assert.equal(context.messages.some(m => m.event?.text === 'late private text'), false);
 });
 
-function engine({ runtimeReady = true, cache, fetcher, cryptoImpl = webcrypto, clock } = {}) {
+function engine({ runtimeReady = true, runtimeFailure = false, decodeFailure = false, cache, fetcher, cryptoImpl = webcrypto, clock, urlImpl = URL } = {}) {
   let speech = true, moduleReady;
   let hypothesis = 'PRIVATE_TAB_A';
   let vadSegment = { samples: new Float32Array(9600), start: 0 };
   const decodedAudio = [];
   const requests = [], events = [], scripts = [];
+  let freedStreams = 0, removedScripts = 0;
   const sandbox = vm.createContext({
     console, crypto: cryptoImpl, performance,
     Date: clock ? class extends Date { static now() { return clock.now; } } : Date,
-    Float32Array, Uint8Array, Blob, URL, Response,
+    Float32Array, Uint8Array, Blob, URL: urlImpl, Response,
     DOMException, AbortController, setTimeout, clearTimeout,
     navigator: { storage: { persist: async () => true } },
     caches: cache || { open: async () => ({ match: async () => null, put: async () => {} }) },
@@ -136,15 +137,16 @@ function engine({ runtimeReady = true, cache, fetcher, cryptoImpl = webcrypto, c
     createVad: () => ({ free() {}, acceptWaveform() {}, isDetected: () => speech, isEmpty: () => false, front: () => vadSegment, pop() {} }),
     OfflineRecognizer: class {
       free() {}
-      createStream() { return { acceptWaveform(rate, audio) { decodedAudio.push(audio.slice()); }, free() {} }; }
-      decode() {}
+      createStream() { return { acceptWaveform(rate, audio) { decodedAudio.push(audio.slice()); }, free() { freedStreams++; } }; }
+      decode() { if (decodeFailure) throw new Error('decode fixture failed'); }
       getResult() { return { text: hypothesis }; }
     },
   });
   sandbox.window = sandbox;
-  sandbox.document = { currentScript: { src: 'http://local/ext-assets/asr-engine.js' }, createElement: () => ({}), head: { appendChild(script) {
+  sandbox.document = { currentScript: { src: 'http://local/ext-assets/asr-engine.js' }, createElement: () => ({ remove() { removedScripts++; } }), head: { appendChild(script) {
     scripts.push(script.src);
     if (script.src.endsWith('sherpa-onnx-wasm-main-vad-asr.js')) {
+      if (runtimeFailure) { script.onerror(); return; }
       moduleReady = () => sandbox.Module.onRuntimeInitialized();
       if (runtimeReady) queueMicrotask(moduleReady);
     }
@@ -153,6 +155,7 @@ function engine({ runtimeReady = true, cache, fetcher, cryptoImpl = webcrypto, c
   vm.runInContext(read('asr-engine.js'), sandbox);
   const config = { apiKey: 'sk-fake', packageUrl: 'http://local/mock.data', packageMeta: { files: [], remote_package_size: 0 }, onEvent: e => events.push(e) };
   return { api: sandbox.JLSEngine, config, events, requests, scripts, decodedAudio, ready: () => moduleReady(),
+    get freedStreams() { return freedStreams; }, get removedScripts() { return removedScripts; },
     hypothesis(text) { hypothesis = text; },
     vadSegment(samples, start = 0) { vadSegment = { samples, start }; },
     speech(seconds) { speech = true; for (let i = 0; i < Math.round(seconds * 10); i++) sandbox.JLSEngine.feed(new Float32Array(1600)); },
@@ -192,6 +195,58 @@ test('long changing previews stay local and only the final sentence is translate
     assert.equal(translations[0].final, true);
     assert.equal(translations[0].id, context.events.find(e => e.type === 'final').id);
   } finally { context.api.stop(); }
+});
+
+test('native ASR streams are freed even when decoding throws', async () => {
+  const context = engine({ decodeFailure: true });
+  await context.api.init(context.config);
+  try {
+    assert.throws(() => context.utterance(), /decode fixture failed/);
+    assert.equal(context.freedStreams, 1);
+  } finally { context.api.stop(); }
+});
+
+test('100 capture restarts abort pending translations and reuse the loaded runtime', async () => {
+  const active = new Set();
+  let calls = 0;
+  const context = engine({ fetcher: (url, { signal }) => new Promise((resolve, reject) => {
+    calls++; active.add(signal);
+    signal.addEventListener('abort', () => { active.delete(signal); reject(new DOMException('cancelled', 'AbortError')); }, { once: true });
+  }) });
+  for (let cycle = 0; cycle < 100; cycle++) {
+    await context.api.init(context.config);
+    context.utterance(); await tick();
+    assert.equal(active.size, 1);
+    context.api.stop(); await tick();
+    assert.equal(active.size, 0);
+    assert.equal(context.api.stats().audio_seconds, 0);
+  }
+  assert.equal(calls, 100);
+  assert.equal(context.freedStreams, 100);
+  assert.equal(context.scripts.length, 3);
+});
+
+test('temporary model blob URLs and loader scripts are released on success and failed retries', async () => {
+  for (const runtimeFailure of [false, true]) {
+    const active = new Set();
+    let created = 0;
+    class OwnedURLs extends URL {
+      static createObjectURL() { const url = 'blob:fixture-' + (++created); active.add(url); return url; }
+      static revokeObjectURL(url) { active.delete(url); }
+    }
+    const fixtures = modelFixtures();
+    const context = engine({ runtimeFailure, cryptoImpl: fixtures.cryptoImpl, fetcher: fixtures.fetcher, urlImpl: OwnedURLs });
+    try {
+      for (let attempt = 0; attempt < (runtimeFailure ? 4 : 1); attempt++) {
+        const initializing = context.api.init({ apiKey: 'sk-fake' });
+        if (runtimeFailure) await assert.rejects(initializing, /无法加载/);
+        else await initializing;
+        assert.equal(active.size, 0, 'the engine must revoke every package URL it owns');
+      }
+      assert.equal(context.removedScripts, context.scripts.length);
+      assert.equal(created, runtimeFailure ? 4 : 1);
+    } finally { context.api.stop(); }
+  }
 });
 
 test('a long utterance only decodes its remaining audio after a forced final', async () => {

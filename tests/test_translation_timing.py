@@ -99,3 +99,25 @@ class TranslationTimingTests(unittest.IsolatedAsyncioTestCase):
         vad._vad = detector
         self.assertEqual(vad.pop_segments(since=32000), [])
         detector.pop.assert_called_once()
+
+    async def test_replaced_translation_notifies_the_waiting_caption(self):
+        entered = asyncio.Event()
+        async def translate(text, target, context):
+            if text == '前の句':
+                entered.set()
+                await asyncio.Event().wait()
+            return Translation(text='新句译文', engine='test', ms=0)
+        translator = SimpleNamespace(translate=translate)
+        events = []
+        with patch('server.streaming.SileroVad'):
+            session = StreamSession(None, translator, events.append)
+        self.addAsyncCleanup(session.close)
+        session._schedule_translation(0, '前の句', final=True)
+        await asyncio.wait_for(entered.wait(), 2)
+        previous = session._translate_task
+        session._schedule_translation(1, '新しい句', final=True)
+        await asyncio.wait_for(session._translate_task, 2)
+        await asyncio.gather(previous, return_exceptions=True)
+        self.assertTrue(previous.cancelled())
+        self.assertIn({'type': 'translation_cancelled', 'id': 0}, events)
+        self.assertEqual([event['id'] for event in events if event['type'] == 'translation'], [1])

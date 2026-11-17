@@ -5,8 +5,8 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { createReadStream, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
@@ -14,8 +14,32 @@ const PORT = Number(process.env.JLS_CDP_PORT || 9343);
 const CHROME = process.env.JLS_CHROME || '/usr/bin/chromium';
 const SRC = ['caption-overlay.js', 'content.js'].map(name => readFileSync(resolve('extension', name), 'utf8')).join('\n');
 const SHOTS = process.argv.includes('--shot-dir') ? process.argv[process.argv.indexOf('--shot-dir') + 1] : null;
+const STRESS = process.argv.includes('--stress');
+const RESTART = process.argv.includes('--wasm');
+const CONTINUOUS = process.argv.includes('--continuous');
+const WASM = RESTART || CONTINUOUS;
+const REPORT = process.argv.includes('--report') ? process.argv[process.argv.indexOf('--report') + 1] : null;
+const metrics = { ui: [], wasm: [], continuous: [] };
+const modelRoot = existsSync(resolve('models/sensevoice-onnx/model.int8.onnx')) ? resolve('models')
+  : join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'speech-to-text/sensevoice/models');
+const files = new Map([
+  ['/ext-assets/asr-engine.js', resolve('extension/asr-engine.js')],
+  ['/models/model.int8.onnx', join(modelRoot, 'sensevoice-onnx/model.int8.onnx')],
+  ['/models/tokens.txt', join(modelRoot, 'sensevoice-onnx/tokens.txt')],
+  ['/models/silero_vad.onnx', join(modelRoot, 'silero/silero_vad.onnx')],
+  ['/sample-ja.wav', resolve('web/static/sample-ja.wav')],
+  ...['sherpa-onnx-asr.js', 'sherpa-onnx-vad.js', 'sherpa-onnx-wasm-main-vad-asr.js', 'sherpa-onnx-wasm-main-vad-asr.wasm']
+    .map(name => ['/ext-assets/wasm/' + name, resolve('extension/wasm', name)]),
+]);
+if (WASM) for (const file of files.values()) assert(existsSync(file), 'Missing real-model fixture: ' + file);
 const profile = mkdtempSync(join(tmpdir(), 'jls-content-'));
 const server = createServer((req, res) => {
+  if (WASM && files.has(req.url)) {
+    const file = files.get(req.url);
+    res.writeHead(200, { 'Content-Type': file.endsWith('.js') ? 'text/javascript' : file.endsWith('.wasm') ? 'application/wasm' : 'application/octet-stream', 'Content-Length': statSync(file).size });
+    createReadStream(file).on('error', error => res.destroy(error)).pipe(res);
+    return;
+  }
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
     *{box-sizing:border-box}body{margin:0;background:#102530;color:#fff;font:16px system-ui}header{padding:28px 6vw;display:flex;justify-content:space-between;border-bottom:1px solid #ffffff15;letter-spacing:.08em}main{height:calc(100vh - 80px);position:relative;overflow:hidden;background:radial-gradient(ellipse at 68% 28%,#b7d0c5 0,transparent 40%),linear-gradient(160deg,#335e69 10%,#86a6a3 48%,#346478 49%,#203e47 83%)}.land{position:absolute;background:#193f3d;clip-path:polygon(0 100%,12% 57%,28% 72%,52% 10%,80% 50%,100% 38%,100% 100%);width:120%;height:56%;bottom:0;left:-10%}.land.far{background:#446b66;bottom:17%;opacity:.7;transform:scaleX(-1)}.label{position:absolute;top:12%;left:7%;font-size:12px;letter-spacing:.2em;color:#e1efe9}.label h1{font-weight:400;font-size:42px;letter-spacing:.03em;margin:14px 0}.label p{font-size:14px;letter-spacing:.03em;opacity:.75}.time{position:absolute;right:6%;bottom:10%;font:12px monospace;opacity:.7}
@@ -26,23 +50,23 @@ const PAGE = `http://127.0.0.1:${server.address().port}/`;
 const child = spawn(CHROME, ['--headless=new', '--no-sandbox', '--disable-breakpad', '--disable-crash-reporter', '--disable-gpu', `--remote-debugging-port=${PORT}`, `--user-data-dir=${profile}`, '--no-first-run', 'about:blank'], { stdio: 'ignore' });
 let counter = 0, ws, sessionId;
 const pending = new Map(), errors = [];
-function call(method, params = {}, session = sessionId) {
+function call(method, params = {}, session = sessionId, timeout = 15000) {
   return new Promise((resolve, reject) => {
     const id = ++counter;
-    const timer = setTimeout(() => { pending.delete(id); reject(new Error('timeout: ' + method)); }, 15000);
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error('timeout: ' + method)); }, timeout);
     pending.set(id, { resolve, reject, timer });
     ws.send(JSON.stringify({ id, method, params, ...(session ? { sessionId: session } : {}) }));
   });
 }
-async function evaluate(expression) {
+async function evaluate(expression, timeout = 15000) {
   let result;
-  try { result = await call('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true, userGesture: true }); }
+  try { result = await call('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true, userGesture: true }, sessionId, timeout); }
   catch (error) { throw new Error(error.message + ': ' + expression.slice(0, 150)); }
   if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
   return result.result.value;
 }
 async function inject() {
-  await evaluate(`window.chrome={runtime:{onMessage:{addListener:fn=>window.__jlsListener=fn},sendMessage:async msg=>{
+  await evaluate(`window.chrome={runtime:{getURL:path=>location.origin+'/ext-assets/'+path,onMessage:{addListener:fn=>window.__jlsListener=fn},sendMessage:async msg=>{
     if(msg.type==='jls:caption-settings-get')return{settings:JSON.parse(localStorage.getItem('test-prefs')||'{}')};
     if(msg.type==='jls:caption-settings-set'){localStorage.setItem('test-prefs',JSON.stringify(msg.settings));return{ok:true}}}}};`);
   await evaluate(SRC);
@@ -64,6 +88,104 @@ async function shot(name) {
   writeFileSync(join(SHOTS, name + '.png'), Buffer.from(data, 'base64'));
 }
 async function bounds() { return evaluate(`(()=>{const r=cap('.wrap').getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height,right:r.right,bottom:r.bottom}})()`); }
+async function memorySnapshot(label) {
+  await sleep(500);
+  await call('HeapProfiler.collectGarbage');
+  const heap = await call('Runtime.getHeapUsage');
+  return { label, heapBytes: heap.usedSize, backingBytes: heap.backingStorageSize, ...await call('Memory.getDOMCounters') };
+}
+async function stressCaptions() {
+  await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
+  await evaluate(`window.__captionStress=async count=>{
+    let overlay, maxRows=0;
+    for(let i=0;i<count;i++){
+      if(i%100===0){overlay?.destroy();overlay=JLS.createCaptionOverlay({hostId:'jls-stress',loadSettings:async()=>({}),saveSettings:()=>{}})}
+      const id=i;overlay.start(id);overlay.text(id,'partial','正在识别的日语 '+i);overlay.text(id,'final','これは長時間動作の確認です。'+i);
+      overlay.translation(id,'内存压测译文，重复验证显示、排队和动画资源的释放。'.repeat(i%4+1),true);
+      if(i%25===24)overlay.root.querySelector('.catch-up').click();
+      maxRows=Math.max(maxRows,overlay.root.querySelectorAll('.row').length);
+      if(i%20===19)await new Promise(r=>setTimeout(r,16));
+    }
+    overlay.clear();overlay.destroy();return maxRows;
+  }`);
+  await evaluate('__captionStress(400)', 120000);
+  metrics.ui.push(await memorySnapshot('warm'));
+  for (let round = 1; round <= 5; round++) {
+    const maxAnimatedRows = await evaluate('__captionStress(2000)', 120000);
+    const point = { ...await memorySnapshot('captions-' + round * 2000), maxAnimatedRows };
+    metrics.ui.push(point);
+    console.log('caption memory:', JSON.stringify(point));
+  }
+  const baseline = metrics.ui[0], last = metrics.ui.at(-1);
+  assert(last.heapBytes - baseline.heapBytes < 2 * 1024 * 1024, 'caption heap keeps growing after collection');
+  assert(last.nodes <= baseline.nodes + 8, 'caption DOM nodes were retained after destroy');
+  assert(last.jsEventListeners <= baseline.jsEventListeners + 2, 'caption event listeners were retained');
+  await evaluate('delete window.__captionStress');
+  checks.push('10,000 caption updates and 100 destroy/recreate cycles retain bounded heap, DOM and listeners');
+}
+async function stressRealWasm() {
+  console.log('WASM memory: loading verified local models');
+  await evaluate(`(async()=>{window.__realFetch=window.fetch.bind(window);window.__liveBlobURLs=new Set();
+    const create=URL.createObjectURL.bind(URL),revoke=URL.revokeObjectURL.bind(URL);
+    URL.createObjectURL=blob=>{const url=create(blob);__liveBlobURLs.add(url);return url};
+    URL.revokeObjectURL=url=>{__liveBlobURLs.delete(url);revoke(url)};
+    window.fetch=(input,init)=>{const url=String(input);
+      if(url==='https://api.deepseek.com/chat/completions')return Promise.resolve(new Response(JSON.stringify({choices:[{message:{content:'本地翻译样本'}}]}),{headers:{'Content-Type':'application/json'}}));
+      if(url.startsWith('https://huggingface.co/')&&url.endsWith('/model.int8.onnx'))return __realFetch('/models/model.int8.onnx');
+      if(url.startsWith('https://huggingface.co/')&&url.endsWith('/tokens.txt'))return __realFetch('/models/tokens.txt');
+      if(url.startsWith('https://github.com/')&&url.endsWith('/silero_vad.onnx'))return __realFetch('/models/silero_vad.onnx');
+      return __realFetch(input,init)};
+    window.__engineCounts={finals:0,translations:0};
+    await new Promise((resolve,reject)=>{const s=document.createElement('script');s.src='/ext-assets/asr-engine.js';s.onload=resolve;s.onerror=reject;document.head.append(s)});
+    const wav=new DataView(await(await __realFetch('/sample-ja.wav')).arrayBuffer());let offset=12,dataOffset=0,dataSize=0;
+    while(offset+8<=wav.byteLength){const name=String.fromCharCode(...[0,1,2,3].map(i=>wav.getUint8(offset+i)));const size=wav.getUint32(offset+4,true);if(name==='data'){dataOffset=offset+8;dataSize=size;break}offset+=8+size+(size%2)}
+    window.__audio=new Float32Array(dataSize/2);for(let i=0;i<__audio.length;i++)__audio[i]=wav.getInt16(dataOffset+i*2,true)/32768;
+    window.__startRealEngine=async()=>{__engineCounts={finals:0,translations:0};await JLSEngine.init({apiKey:'sk-local-fixture',onEvent:event=>{if(event.type==='final')__engineCounts.finals++;if(event.type==='translation')__engineCounts.translations++}})};
+    window.__realEngineCycle=async(restart=true)=>{
+      if(restart)await __startRealEngine();
+      for(let i=0;i<__audio.length;i+=1600)JLSEngine.feed(__audio.slice(i,i+1600));
+      for(let i=0;i<16;i++)JLSEngine.feed(new Float32Array(1600));
+      await new Promise(r=>setTimeout(r,50));const stats=JLSEngine.stats();if(restart)JLSEngine.stop();
+      return{...__engineCounts,audioSeconds:stats.audio_seconds,decodes:stats.decodes,wasmBytes:Module.HEAPU8.byteLength,blobURLs:__liveBlobURLs.size,loaderScripts:document.scripts.length};
+    }})()`, 120000);
+  for (let cycle = 0; cycle < (RESTART ? 24 : 0); cycle++) {
+    const result = await evaluate('__realEngineCycle()', 120000);
+    assert(result.finals > 0 && result.translations === result.finals, 'real WASM did not complete audio/translation');
+    assert.equal(result.blobURLs, 0, 'model object URL remains registered');
+    const point = { cycle, ...result, ...await memorySnapshot('wasm-' + cycle) };
+    metrics.wasm.push(point);
+    console.log('WASM memory:', JSON.stringify(point));
+  }
+  // The linear memory never shrinks and ORT may expand its arena after a larger
+  // decode window. Check a sustained tail after repeated identical audio cycles.
+  if (RESTART) {
+    const settled = metrics.wasm.slice(-8), first = settled[0], last = settled.at(-1);
+    assert(last.wasmBytes - first.wasmBytes <= 32 * 1024 * 1024, 'native WASM allocations continue growing after warmup');
+    assert(last.heapBytes - first.heapBytes <= 2 * 1024 * 1024, 'WASM wrapper heap continues growing');
+    assert(last.nodes <= first.nodes + 8 && last.jsEventListeners <= first.jsEventListeners + 2, 'WASM loader DOM/listeners remain retained');
+    checks.push('real SenseVoice WASM completes 24 start/decode/stop cycles with released model URLs and stable post-warmup memory');
+  }
+  if (CONTINUOUS) {
+    await evaluate('__startRealEngine()', 120000);
+    for (let block = 0; block < 8; block++) {
+      let result;
+      for (let sample = 0; sample < 8; sample++) result = await evaluate('__realEngineCycle(false)', 120000);
+      assert(result.translations === result.finals && result.finals > 0);
+      assert.equal(result.blobURLs, 0);
+      const point = { ...result, ...await memorySnapshot('continuous-' + (block + 1) * 8) };
+      metrics.continuous.push(point);
+      console.log('continuous memory:', JSON.stringify(point));
+    }
+    const first = metrics.continuous[2], last = metrics.continuous.at(-1);
+    assert(last.heapBytes - first.heapBytes < 2 * 1024 * 1024, 'continuous capture heap keeps growing');
+    assert(last.backingBytes - first.backingBytes < 2 * 1024 * 1024, 'PCM buffers keep growing');
+    assert(last.wasmBytes - first.wasmBytes <= 32 * 1024 * 1024, 'continuous native allocations keep growing');
+    assert.equal(last.nodes, first.nodes); assert.equal(last.jsEventListeners, first.jsEventListeners);
+    await evaluate('JLSEngine.stop()');
+    metrics.continuous.push(await memorySnapshot('continuous-stopped'));
+    checks.push('one uninterrupted capture processes 64 audio samples with bounded PCM buffers and stable memory');
+  }
+}
 const checks = [];
 try {
   let version;
@@ -87,6 +209,33 @@ try {
   await call('Runtime.enable'); await call('Page.enable');
   await call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
   await sleep(300); await inject();
+  await evaluate(`send({type:'partial',id:100,text:'今日は東京の天気について'});window.__sourceFont=getComputedStyle(cap('.live .ja')).fontSize;send({type:'final',id:100,text:'今日は東京の天気についてお話しします。'});
+    window.__sourceRow=cap('.rows .row[data-id="100"]');window.__sourceJa=__sourceRow?.querySelector('.ja');
+    send({type:'speech_start',id:101});send({type:'partial',id:101,text:'午後から雨が'});`);
+  assert.equal(await evaluate(`__sourceJa?.textContent`), '今日は東京の天気についてお話しします。');
+  assert.equal(await evaluate(`getComputedStyle(__sourceJa).fontSize===__sourceFont`), true);
+  await sleep(350);
+  assert.equal(await evaluate(`getComputedStyle(__sourceRow).opacity`), '1');
+  const continuity = await evaluate(`(async()=>{const samples=[];send({type:'translation',id:100,final:true,text:'今天介绍东京的天气。'});
+    for(let i=0;i<30;i++){await new Promise(requestAnimationFrame);const r=cap('.wrap').getBoundingClientRect();samples.push({x:r.x,width:r.width,ja:__sourceJa.isConnected&&__sourceJa.textContent==='今日は東京の天気についてお話しします。',opacity:Number(getComputedStyle(__sourceRow).opacity)})}return samples})()`);
+  assert(continuity.every(frame => frame.ja && frame.opacity === 1));
+  assert(Math.max(...continuity.map(frame => frame.x)) - Math.min(...continuity.map(frame => frame.x)) < .1);
+  assert(Math.max(...continuity.map(frame => frame.width)) - Math.min(...continuity.map(frame => frame.width)) < .1);
+  assert.equal(await evaluate(`cap('.rows .row[data-id="100"]')===__sourceRow`), true);
+  await evaluate(`window.__jlsListener({type:'jls:clear'},{},()=>{});delete window.__sourceRow;delete window.__sourceJa;delete window.__sourceFont`);
+  checks.push('final Japanese stays in the same opaque row during delayed MT and the next speech start');
+  await evaluate(`final(200,'長い字幕のスクロールを確認します。','长字幕滚动测试，文字宽度保持不变。'.repeat(70));`);
+  await sleep(400);
+  const reflow = await evaluate(`(async()=>{const out=[];send({type:'final',id:201,text:'次の短い句です。'});send({type:'translation',id:201,final:true,text:'下一句很短。'});
+    for(let i=0;i<25;i++){await new Promise(requestAnimationFrame);const r=cap('.wrap').getBoundingClientRect();const rows=cap('.rows');out.push({x:r.x,width:r.width,content:rows.clientWidth,font:parseFloat(getComputedStyle(cap('.rows .zh')).fontSize),gutter:rows.offsetWidth-rows.clientWidth})}return out})()`);
+  assert(reflow.every(frame => frame.font === 24 && frame.gutter === 0));
+  for (const key of ['x', 'width', 'content']) assert(Math.max(...reflow.map(frame => frame[key])) - Math.min(...reflow.map(frame => frame[key])) < .1, key + ' moved during caption growth');
+  assert(await evaluate(`cap('.rows').scrollHeight>cap('.rows').clientHeight`));
+  const wheel = await evaluate(`(()=>{const r=cap('.rows').getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+30}})()`);
+  await move(wheel.x, wheel.y); await call('Input.dispatchMouseEvent', { type: 'mouseWheel', ...wheel, deltaY: 120, deltaX: 0 }); await sleep(120);
+  assert(await evaluate(`cap('.rows').scrollTop>0`));
+  await evaluate(`window.__jlsListener({type:'jls:clear'},{},()=>{})`); await move(1, 1);
+  checks.push('row promotion and height animation preserve fixed text width without a scrollbar; wheel scrolling still works');
   await evaluate(`final(1,'今日は、山の向こうにある小さな町まで歩いてみようと思います。','今天想慢慢走到山那边的小镇，沿途看看河流和树林，也给自己留一点不赶时间的余地。');
     final(2,'いいですね。','听起来很好。');final(3,'行きましょう。','那就出发吧。');`);
   await sleep(500);
@@ -112,7 +261,7 @@ try {
   checks.push('hover strengthens only the background and reveals working style controls');
   await evaluate(`for(const[key,value]of Object.entries({fontSize:30,width:72,background:12,color:'#fff1ce'})){const el=cap('[data-setting="'+key+'"]');el.value=value;el.dispatchEvent(new Event('input',{bubbles:true}))}`);
   await sleep(400);
-  assert.equal(await evaluate(`getComputedStyle(cap('.zh')).fontSize`), '27.6px');
+  assert.equal(await evaluate(`getComputedStyle(cap('.zh')).fontSize`), '30px');
   assert.equal(await evaluate(`cap('.wrap').classList.contains('dragging')`), false);
   await click('.settings-toggle');
   const handle = await evaluate(`(()=>{const r=cap('.drag').getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})()`);
@@ -176,7 +325,7 @@ try {
   await call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
   await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
   await sleep(50);
-  await evaluate(`final(11,'動きを減らす設定です。','尊重系统的减少动态效果设置。')`);
+  await evaluate(`final(21,'動きを減らす設定です。','尊重系统的减少动态效果设置。')`);
   assert.equal(await evaluate(`cap('.wrap').getAnimations({subtree:true}).length`), 0);
   checks.push('reduced-motion preference disables transitions and entry/exit animations');
   // Headless Chromium may leave requestFullscreen pending. Exercise the DOM
@@ -192,10 +341,13 @@ try {
   await evaluate(SRC);
   assert.equal(await evaluate(`document.querySelectorAll('#ja-live-subs-host').length`), 1);
   checks.push('stop clears retained rows and repeated injection does not duplicate the overlay');
+  if (STRESS) await stressCaptions();
+  if (WASM) await stressRealWasm();
   assert.deepEqual(errors, []);
+  if (REPORT) writeFileSync(REPORT, JSON.stringify(metrics, null, 2));
   for (const check of checks) console.log('PASS:', check);
   console.log('RESULT: PASS');
-} catch (error) { for (const check of checks) console.log('PASS:', check); console.error('RESULT: FAIL', error.stack || error); process.exitCode = 1; }
+} catch (error) { if (REPORT) writeFileSync(REPORT, JSON.stringify(metrics, null, 2)); for (const check of checks) console.log('PASS:', check); console.error('RESULT: FAIL', error.stack || error); process.exitCode = 1; }
 finally {
   ws?.close(); child.kill(); await new Promise(resolve => server.close(resolve));
   for (const item of pending.values()) clearTimeout(item.timer);
