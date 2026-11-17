@@ -119,23 +119,28 @@ test('stop during engine initialization stops media and suppresses late progress
   assert.equal(context.messages.some(m => m.event?.text === 'late private text'), false);
 });
 
-function engine({ runtimeReady = true, runtimeFailure = false, decodeFailure = false, cache, fetcher, cryptoImpl = webcrypto, clock, urlImpl = URL } = {}) {
+function engine({ runtimeReady = true, runtimeFailure = false, decodeFailure = false, cache, fetcher, domainFetcher, cryptoImpl = webcrypto, clock, urlImpl = URL, requestTimeoutMs } = {}) {
   let speech = true, moduleReady;
   let hypothesis = 'PRIVATE_TAB_A';
   let vadSegment = { samples: new Float32Array(9600), start: 0 };
   const decodedAudio = [];
   const requests = [], events = [], scripts = [];
   let freedStreams = 0, removedScripts = 0;
+  let recognizerConfig;
   const sandbox = vm.createContext({
     console, crypto: cryptoImpl, performance,
     Date: clock ? class extends Date { static now() { return clock.now; } } : Date,
-    Float32Array, Uint8Array, Blob, URL: urlImpl, Response,
-    DOMException, AbortController, setTimeout, clearTimeout,
+    Float32Array, Uint8Array, Blob, URL: urlImpl, Response, TextEncoder,
+    DOMException, AbortController,
+    setTimeout: (fn, delay) => setTimeout(fn, delay === 12000 && requestTimeoutMs !== undefined ? requestTimeoutMs : delay), clearTimeout,
     navigator: { storage: { persist: async () => true } },
     caches: cache || { open: async () => ({ match: async () => null, put: async () => {} }) },
-    fetch: fetcher || ((url, options) => { const request = deferred(); requests.push({ ...request, url, options }); return request.promise; }),
+    fetch: (url, options) => String(url).endsWith('/asr-terms.json')
+      ? domainFetcher ? domainFetcher() : Promise.resolve(new Response(read('asr-terms.json')))
+      : fetcher ? fetcher(url, options) : (() => { const request = deferred(); requests.push({ ...request, url, options }); return request.promise; })(),
     createVad: () => ({ free() {}, acceptWaveform() {}, isDetected: () => speech, isEmpty: () => false, front: () => vadSegment, pop() {} }),
     OfflineRecognizer: class {
+      constructor(config) { recognizerConfig = config; }
       free() {}
       createStream() { return { acceptWaveform(rate, audio) { decodedAudio.push(audio.slice()); }, free() { freedStreams++; } }; }
       decode() { if (decodeFailure) throw new Error('decode fixture failed'); }
@@ -145,6 +150,7 @@ function engine({ runtimeReady = true, runtimeFailure = false, decodeFailure = f
   sandbox.window = sandbox;
   sandbox.document = { currentScript: { src: 'http://local/ext-assets/asr-engine.js' }, createElement: () => ({ remove() { removedScripts++; } }), head: { appendChild(script) {
     scripts.push(script.src);
+    if (script.src.endsWith('/asr-domain.js')) vm.runInContext(read('asr-domain.js'), sandbox);
     if (script.src.endsWith('sherpa-onnx-wasm-main-vad-asr.js')) {
       if (runtimeFailure) { script.onerror(); return; }
       moduleReady = () => sandbox.Module.onRuntimeInitialized();
@@ -155,12 +161,13 @@ function engine({ runtimeReady = true, runtimeFailure = false, decodeFailure = f
   vm.runInContext(read('asr-engine.js'), sandbox);
   const config = { apiKey: 'sk-fake', packageUrl: 'http://local/mock.data', packageMeta: { files: [], remote_package_size: 0 }, onEvent: e => events.push(e) };
   return { api: sandbox.JLSEngine, config, events, requests, scripts, decodedAudio, ready: () => moduleReady(),
+    get recognizerConfig() { return recognizerConfig; },
     get freedStreams() { return freedStreams; }, get removedScripts() { return removedScripts; },
     hypothesis(text) { hypothesis = text; },
     vadSegment(samples, start = 0) { vadSegment = { samples, start }; },
     speech(seconds) { speech = true; for (let i = 0; i < Math.round(seconds * 10); i++) sandbox.JLSEngine.feed(new Float32Array(1600)); },
     endSpeech() { speech = false; sandbox.JLSEngine.feed(new Float32Array(1600)); },
-    utterance() { speech = true; for (let i = 0; i < 6; i++) sandbox.JLSEngine.feed(new Float32Array(1600)); speech = false; sandbox.JLSEngine.feed(new Float32Array(1600)); },
+    utterance() { vadSegment = { samples: new Float32Array(9600), start: Math.round(sandbox.JLSEngine.stats().audio_seconds * 16000) }; speech = true; for (let i = 0; i < 6; i++) sandbox.JLSEngine.feed(new Float32Array(1600)); speech = false; sandbox.JLSEngine.feed(new Float32Array(1600)); },
   };
 }
 
@@ -187,8 +194,8 @@ test('long changing previews stay local and only the final sentence is translate
     await tick();
     assert.equal(context.requests.length, 1);
     const payload = JSON.parse(context.requests[0].options.body);
-    assert.equal(payload.messages.find(m => m.role === 'user').content, finalText);
-    context.requests[0].resolve({ ok: true, json: async () => ({ choices: [{ message: { content: '今天介绍东京的天气，下午可能下雨。' } }] }) });
+    assert.equal(JSON.parse(payload.messages.find(m => m.role === 'user').content).current, finalText);
+    context.requests[0].resolve({ ok: true, json: async () => ({ choices: [{ finish_reason: 'stop', message: { content: '今天介绍东京的天气，下午可能下雨。' } }] }) });
     await tick();
     const translations = context.events.filter(e => e.type === 'translation');
     assert.equal(translations.length, 1);
@@ -223,7 +230,7 @@ test('100 capture restarts abort pending translations and reuse the loaded runti
   }
   assert.equal(calls, 100);
   assert.equal(context.freedStreams, 100);
-  assert.equal(context.scripts.length, 3);
+  assert.equal(context.scripts.length, 4);
 });
 
 test('temporary model blob URLs and loader scripts are released on success and failed retries', async () => {
@@ -257,7 +264,7 @@ test('a long utterance only decodes its remaining audio after a forced final', a
     await tick();
     assert.equal(context.requests.length, 1);
     assert.equal(context.decodedAudio.at(-1).length, 12 * 16000);
-    context.requests[0].resolve({ ok: true, json: async () => ({ choices: [{ message: { content: '前半译文' } }] }) });
+    context.requests[0].resolve({ ok: true, json: async () => ({ choices: [{ finish_reason: 'stop', message: { content: '前半译文' } }] }) });
     await tick();
     context.speech(1);
     const wholeUtterance = new Float32Array(13 * 16000).fill(1);
@@ -268,7 +275,7 @@ test('a long utterance only decodes its remaining audio after a forced final', a
     assert.equal(context.requests.length, 2, 'one request for each non-overlapping final');
     assert.equal(context.decodedAudio.at(-1).length, 16000);
     assert(context.decodedAudio.at(-1).every(value => value === 2), 'previously finalized audio must not be decoded again');
-    context.requests[1].resolve({ ok: true, json: async () => ({ choices: [{ message: { content: '剩余译文' } }] }) });
+    context.requests[1].resolve({ ok: true, json: async () => ({ choices: [{ finish_reason: 'stop', message: { content: '剩余译文' } }] }) });
     await tick();
   } finally { context.api.stop(); }
 });
@@ -283,11 +290,11 @@ test('late API response is aborted and cannot leak into a new session', async ()
   assert.equal(context.requests[0].options.signal.aborted, true);
   const next = [];
   await context.api.init({ ...context.config, onEvent: e => next.push(e) });
-  context.requests[0].resolve({ ok: true, json: async () => ({ choices: [{ message: { content: 'PRIVATE_TRANSLATION' } }] }) });
+  context.requests[0].resolve({ ok: true, json: async () => ({ choices: [{ finish_reason: 'stop', message: { content: 'PRIVATE_TRANSLATION' } }] }) });
   await tick();
   assert.equal(next.some(e => e.text === 'PRIVATE_TRANSLATION'), false);
   assert.equal(context.api.stats().audio_seconds, 0);
-  assert.equal(context.scripts.length, 3, 'runtime scripts must load once across restarts');
+  assert.equal(context.scripts.length, 4, 'runtime and lexicon scripts must load once across restarts');
   context.api.stop();
 });
 
@@ -324,7 +331,7 @@ test('tampered cached model is removed and corrupt download is rejected before W
   });
   await assert.rejects(context.api.init({ onEvent() {} }), /校验失败/);
   assert.equal(deleted, true);
-  assert.equal(context.scripts.length, 0);
+  assert.equal(context.scripts.filter(src => src.includes('/wasm/')).length, 0);
 });
 
 // Cache behavior uses tiny fixtures; cryptographic validation itself is covered
@@ -426,10 +433,11 @@ test('background forwards mode/keys and refuses stale or spoofed events', async 
     },
   });
   vm.runInContext(read('background.js'), sandbox);
-  const message = { type: 'jls:start', tabId: 1, engine: 'server', apiKey: 'sk-fake', serverToken: 'token', streamId: 'mock' };
+  const message = { type: 'jls:start', tabId: 1, engine: 'server', apiKey: 'sk-fake', serverToken: 'token', streamId: 'mock', asrDomain: 'anime' };
   assert.equal((await dispatch(listener, message, 'popup.html')).ok, true);
   const first = sent.find(m => m.type === 'jls:offscreen-start');
   assert.equal(first.engine, 'server'); assert.equal(first.apiKey, 'sk-fake'); assert.equal(first.serverToken, 'token');
+  assert.equal(first.asrDomain, 'anime');
   await dispatch(listener, { ...message, tabId: 2 }, 'popup.html');
   painted.length = 0;
   await dispatch(listener, { type: 'jls:event', sessionId: first.sessionId, event: { text: 'private' } }, 'offscreen.html');
@@ -479,6 +487,7 @@ test('browser-mode popup starts without fetching a local service', async () => {
   await element('start').click();
   assert.equal(calls, 0);
   assert.equal(sent.find(m => m.type === 'jls:start').engine, 'browser');
+  assert.equal(sent.find(m => m.type === 'jls:start').asrDomain, 'gakumas');
 });
 
 test('content scripts can persist only public caption preferences through the background', async () => {
@@ -515,4 +524,245 @@ test('content scripts can persist only public caption preferences through the ba
   const manifest = JSON.parse(read('manifest.json'));
   const scripts = manifest.content_scripts.find(entry => entry.js.includes('content.js')).js;
   assert(scripts.indexOf('caption-overlay.js') >= 0 && scripts.indexOf('caption-overlay.js') < scripts.indexOf('content.js'));
+});
+
+const successfulReply = (text = '完整译文', usage = { prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 20, completion_tokens: 5 }) => ({
+  ok: true, json: async () => ({ choices: [{ finish_reason: 'stop', message: { content: text } }], usage }),
+});
+async function translatedUtterance(context, text) {
+  const previous = context.requests.length;
+  context.hypothesis(text); context.utterance(); await tick();
+  if (context.requests.length > previous) context.requests.at(-1).resolve(successfulReply());
+  await tick();
+}
+
+test('browser prompt contract is fixed and uses the same JSON envelope as Python', async () => {
+  const fixture = JSON.parse(fs.readFileSync(new URL('fixtures/translation_contract.json', import.meta.url), 'utf8'));
+  const context = engine(); await context.api.init(context.config);
+  try {
+    await translatedUtterance(context, '前の句');
+    await translatedUtterance(context, '今の句');
+    const payload = JSON.parse(context.requests[1].options.body);
+    assert.deepEqual(payload.messages[0], { role: 'system', content: fixture.system.zh });
+    assert.deepEqual(JSON.parse(payload.messages[1].content), { previous: '前の句', current: '今の句' });
+    assert.equal(JSON.parse(context.requests[0].options.body).messages[0].content, payload.messages[0].content);
+    context.api.setConfig({ target: 'en' });
+    await translatedUtterance(context, 'English target');
+    assert.equal(JSON.parse(context.requests[2].options.body).messages[0].content, fixture.system.en);
+  } finally { context.api.stop(); }
+});
+
+test('browser reuse respects context and a cache hit advances context for the next sentence', async () => {
+  const context = engine(); await context.api.init(context.config);
+  try {
+    for (const text of ['句A', '句B', '句A', '句B', '句A']) await translatedUtterance(context, text);
+    assert.equal(context.requests.length, 3);
+    assert.deepEqual(context.events.filter(e => e.type === 'translation').map(e => e.source), ['api', 'api', 'api', 'cache', 'cache']);
+    const stats = context.api.stats().translation;
+    assert.equal(stats.api_requests, 3); assert.equal(stats.local_cache_hits, 2);
+    assert.equal(stats.prompt_cache_hit_tokens, 0);
+    assert.equal(stats.prompt_cache_miss_tokens, 60); assert.equal(stats.completion_tokens, 15);
+  } finally { context.api.stop(); }
+});
+
+test('browser concurrent identical requests share one API result and emit once per distinct segment', async () => {
+  const context = engine(); await context.api.init(context.config);
+  try {
+    context.hypothesis('同じ句'); context.utterance(); context.utterance();
+    await tick(); assert.equal(context.requests.length, 1);
+    context.requests[0].resolve(successfulReply()); await tick();
+    const events = context.events.filter(e => e.type === 'translation');
+    assert.equal(events.length, 2); assert.equal(new Set(events.map(e => e.id)).size, 2);
+    const stats = context.api.stats().translation;
+    assert.equal(stats.api_requests, 1); assert.equal(stats.merged_requests, 1);
+    assert.equal(stats.completion_tokens, 5); assert.equal(stats.in_flight, 0);
+    assert.equal(stats.deliveries_in_flight, 0);
+  } finally { context.api.stop(); }
+});
+
+test('browser model, version, endpoint and output parameter changes clear session reuse and counters', async () => {
+  const context = engine(); await context.api.init(context.config);
+  try {
+    await translatedUtterance(context, '句');
+    for (const config of [{ model: 'other-model' }, { promptVersion: 'subtitle-v3' }, { baseUrl: 'https://api.deepseek.com/v1' }, { temperature: .3 }, { maxTokens: 513 }, { apiKey: 'sk-new-fixture' }]) {
+      context.api.setConfig(config);
+      assert.equal(context.api.stats().translation.cache_entries, 0);
+      assert.equal(context.api.stats().translation.api_requests, 0);
+      await translatedUtterance(context, '句');
+    }
+    const latest = context.requests.at(-1);
+    assert.equal(latest.url, 'https://api.deepseek.com/v1/chat/completions');
+    assert.equal(JSON.parse(latest.options.body).model, 'other-model');
+    assert.equal(JSON.parse(latest.options.body).max_tokens, 513);
+    assert.deepEqual(JSON.parse(JSON.parse(latest.options.body).messages[1].content), { previous: '', current: '句' });
+  } finally { context.api.stop(); }
+});
+
+test('browser incomplete and failed responses are not cached and can be retried', async () => {
+  const context = engine(); await context.api.init(context.config);
+  try {
+    for (const response of [
+      { ok: false, status: 500 },
+      { ok: true, json: async () => ({ choices: [{ finish_reason: 'length', message: { content: '截断的输出' } }] }) },
+      { ok: true, json: async () => ({ choices: [{ message: { content: '缺失结束标记' } }] }) },
+      successfulReply('  '), successfulReply('“”'),
+    ]) {
+      context.hypothesis('同じ句'); context.utterance(); await tick();
+      context.requests.at(-1).resolve(response); await tick();
+      assert.equal(context.api.stats().translation.cache_entries, 0);
+      assert.equal(context.api.stats().translation.in_flight, 0);
+    }
+    await translatedUtterance(context, '同じ句');
+    assert.equal(context.requests.length, 6);
+    assert.equal(context.events.filter(e => e.type === 'translation').length, 1);
+  } finally { context.api.stop(); }
+});
+
+test('browser usage missing fields remain unavailable and timeout cleanup permits retry', async () => {
+  let attempts = 0;
+  const context = engine({ requestTimeoutMs: 15, fetcher: (url, { signal }) => {
+    attempts++;
+    if (attempts === 1) return new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(new DOMException('timeout', 'AbortError')), { once: true }));
+    return Promise.resolve(successfulReply('成功', { prompt_cache_hit_tokens: 0, completion_tokens: 0 }));
+  } });
+  await context.api.init(context.config);
+  try {
+    context.utterance(); await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal(context.api.stats().translation.in_flight, 0);
+    assert.equal(context.api.stats().translation.cache_entries, 0);
+    context.utterance(); await tick();
+    const stats = context.api.stats().translation;
+    assert.equal(stats.api_requests, 2); assert.equal(stats.api_requests_completed, 2);
+    assert.equal(stats.prompt_cache_hit_tokens, null);
+    assert.equal(stats.prompt_cache_miss_tokens, null);
+    assert.equal(stats.usage_reported_tokens.prompt_cache_hit_tokens, 0);
+    assert.equal(stats.usage_unavailable_requests.prompt_cache_hit_tokens, 1);
+    assert.equal(stats.usage_unavailable_requests.prompt_cache_miss_tokens, 2);
+  } finally { context.api.stop(); }
+});
+
+test('browser configuration changes and restarts cannot deliver or cache an old request', async () => {
+  const context = engine(); await context.api.init(context.config);
+  context.utterance(); await tick();
+  const previous = context.requests[0];
+  context.api.setConfig({ target: 'en' });
+  assert.equal(previous.options.signal.aborted, true);
+  previous.resolve(successfulReply('旧译文')); await tick();
+  assert.equal(context.events.filter(e => e.type === 'translation').length, 0);
+  assert.equal(context.api.stats().translation.cache_entries, 0);
+  assert.equal(context.api.stats().translation.api_requests, 0);
+  context.api.stop(); await context.api.init(context.config);
+  await translatedUtterance(context, 'PRIVATE_TAB_A');
+  assert.equal(context.requests.length, 2);
+  assert.equal(context.api.stats().translation.api_requests, 1);
+  context.api.stop();
+});
+
+test('browser cache, delivery bookkeeping and statistics remain bounded in a long session', async () => {
+  let calls = 0;
+  const context = engine({ fetcher: async (url, options) => {
+    calls++;
+    const text = JSON.parse(JSON.parse(options.body).messages[1].content).current;
+    return successfulReply(text === 'too-large' ? '字'.repeat(40000) : '完整译文'.repeat(180));
+  } });
+  await context.api.init(context.config);
+  try {
+    for (let i = 0; i < 650; i++) { context.hypothesis('台词' + i); context.utterance(); await tick(); }
+    let stats = context.api.stats().translation;
+    assert.equal(calls, 650); assert(stats.cache_entries <= 500); assert(stats.cache_bytes <= 1024 * 1024);
+    assert(stats.delivered_segments <= 500); assert.equal(stats.in_flight, 0); assert.equal(stats.deliveries_in_flight, 0);
+    const bytes = stats.cache_bytes;
+    context.hypothesis('too-large'); context.utterance(); await tick();
+    stats = context.api.stats().translation;
+    assert.equal(stats.cache_bytes, bytes, 'oversized translations must not enter the cache');
+    context.api.stop(); stats = context.api.stats().translation;
+    assert.equal(stats.cache_entries, 0); assert.equal(stats.in_flight, 0); assert.equal(stats.api_requests, 0);
+    assert.equal(stats.prompt_cache_hit_tokens, null);
+  } finally { context.api.stop(); }
+});
+
+test('browser timeout removes the record even if fetch ignores abort; late data stays discarded', async () => {
+  const context = engine({ requestTimeoutMs: 15 }); await context.api.init(context.config);
+  try {
+    context.utterance(); await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal(context.api.stats().translation.in_flight, 0);
+    assert.equal(context.api.stats().translation.deliveries_in_flight, 0);
+    context.requests[0].resolve(successfulReply('迟到的数据')); await tick();
+    assert.equal(context.events.filter(e => e.type === 'translation').length, 0);
+    assert.equal(context.api.stats().translation.cache_entries, 0);
+    await translatedUtterance(context, 'PRIVATE_TAB_A');
+    assert.equal(context.requests.length, 2);
+    assert.equal(context.events.filter(e => e.type === 'translation').length, 1);
+  } finally { context.api.stop(); }
+});
+
+test('browser failures and usage statistics never echo dialogue, provider bodies or credentials', async () => {
+  const context = engine(); await context.api.init(context.config);
+  try {
+    context.hypothesis('PRIVATE_SENTENCE'); context.utterance(); await tick();
+    context.requests[0].resolve({ ok: true, json: async () => { throw new Error('PRIVATE_SENTENCE sk-private-context'); } });
+    await tick();
+    const diagnostic = JSON.stringify({ errors: context.events.filter(e => e.type === 'error'), stats: context.api.stats().translation });
+    assert(!diagnostic.includes('PRIVATE_SENTENCE'));
+    assert(!diagnostic.includes('sk-private-context'));
+    assert(!diagnostic.includes('Bearer'));
+    assert.equal(context.api.stats().translation.in_flight, 0);
+  } finally { context.api.stop(); }
+});
+
+test('browser Japanese decoding and domain correction reach both preview and final translation', async () => {
+  const clock = { now: 10000 }, context = engine({ clock });
+  await context.api.init(context.config);
+  try {
+    assert.equal(context.recognizerConfig.modelConfig.senseVoice.language, 'ja');
+    context.hypothesis('日高 真白さんと秦谷みすずの話です。');
+    context.speech(1.5); await tick();
+    assert.equal(context.events.find(event => event.type === 'partial').text, '陽高真白さんと秦谷美鈴の話です。');
+    assert.equal(context.requests.length, 0);
+    context.endSpeech(); await tick();
+    assert.equal(context.events.find(event => event.type === 'final').text, '陽高真白さんと秦谷美鈴の話です。');
+    assert.equal(JSON.parse(JSON.parse(context.requests[0].options.body).messages[1].content).current, '陽高真白さんと秦谷美鈴の話です。');
+    context.requests[0].resolve(successfulReply()); await tick();
+    assert.equal(context.events.filter(event => event.type === 'translation').length, 1);
+  } finally { context.api.stop(); }
+});
+
+test('changing ASR domain cancels old translation and starts with clean context and correct text', async () => {
+  const context = engine(); await context.api.init(context.config);
+  try {
+    context.hypothesis('日高真白さん'); context.utterance(); await tick();
+    context.api.setConfig({ asrDomain: 'off' });
+    assert.equal(context.requests[0].options.signal.aborted, true);
+    context.requests[0].resolve(successfulReply('old')); await tick();
+    assert.equal(context.events.filter(event => event.type === 'translation').length, 0);
+    await translatedUtterance(context, '日高真白さん');
+    assert.equal(context.events.filter(event => event.type === 'final').at(-1).text, '日高真白さん');
+    const user = JSON.parse(JSON.parse(context.requests.at(-1).options.body).messages[1].content);
+    assert.deepEqual(user, { previous: '', current: '日高真白さん' });
+    assert.equal(context.api.stats().asr_domain, 'off');
+    assert.throws(() => context.api.setConfig({ asrDomain: 'unknown' }), /未知/);
+    await context.api.init(context.config);
+    await translatedUtterance(context, '日高真白さん');
+    assert.equal(context.events.filter(event => event.type === 'final').at(-1).text, '陽高真白さん');
+  } finally { context.api.stop(); }
+});
+
+test('a failed lexicon load can retry and stopping during the load cannot publish a ready engine', async () => {
+  let calls = 0;
+  const loaded = deferred();
+  const context = engine({ domainFetcher: () => {
+    calls++;
+    return calls === 1 ? Promise.resolve(new Response('not json')) : loaded.promise;
+  } });
+  await assert.rejects(context.api.init(context.config), /识别词表加载失败/);
+  const pending = context.api.init(context.config);
+  const cancelled = assert.rejects(pending, { name: 'AbortError' });
+  await tick(); context.api.stop();
+  loaded.resolve(new Response(read('asr-terms.json')));
+  await cancelled;
+  assert.equal(context.events.some(event => event.type === 'ready'), false);
+  await context.api.init(context.config);
+  assert.equal(calls, 2, 'static lexicon is fetched only once after a successful load');
+  assert.equal(context.events.filter(event => event.type === 'ready').length, 1);
+  context.api.stop();
 });

@@ -1,5 +1,6 @@
 {
   "asr": "sensevoice",
+  "asr_domain": "gakumas",
   "translator": "deepseek",
   "deepseek_api_key": "sk-在这里填入你的 DeepSeek API Key",
   "port": 8765,

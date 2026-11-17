@@ -116,7 +116,7 @@ async function start(msg) {
       };
     } else {
       capture.engineStarted = true;
-      await Promise.race([JLSEngine.init({ target: msg.target || 'zh', apiKey: msg.apiKey || '', onEvent: event => {
+      await Promise.race([JLSEngine.init({ target: msg.target || 'zh', apiKey: msg.apiKey || '', asrDomain: msg.asrDomain || 'gakumas', onEvent: event => {
         if (!current(capture)) return;
         if (event.type === 'progress') report(capture, 'starting', event.message);
         else send(capture, event);

@@ -1,0 +1,1699 @@
+{
+  "version": 1,
+  "description": "Gakumas / seiyuu / BanG Dream / Love Live spelling lexicon; not acoustic-model training. Full-name aliases only; ambiguous titles require nearby cues.",
+  "cues": {
+    "song": [
+      "曲",
+      "歌",
+      "歌う",
+      "歌い",
+      "歌っ",
+      "ライブ",
+      "カバー",
+      "演奏",
+      "披露",
+      "セトリ",
+      "主題歌",
+      "オープニング",
+      "エンディング",
+      "アニソン",
+      "リリイベ"
+    ],
+    "bandori": [
+      "バンドリ",
+      "ばんどり",
+      "BanG Dream",
+      "MyGO",
+      "Ave Mujica",
+      "ロゼリア",
+      "Roselia",
+      "ポピパ",
+      "ガルパ"
+    ],
+    "lovelive": [
+      "ラブライブ",
+      "らぶらいぶ",
+      "虹ヶ咲",
+      "虹が咲",
+      "蓮ノ空",
+      "蓮の空",
+      "Liella",
+      "Aqours",
+      "μ’s",
+      "μ's"
+    ],
+    "broadcast": [
+      "配信",
+      "放送",
+      "生放送",
+      "生配信",
+      "番組",
+      "ゲスト",
+      "声優",
+      "YouTube",
+      "学マス",
+      "ラブライブ",
+      "バンドリ"
+    ],
+    "recording": [
+      "アフレコ",
+      "収録",
+      "声優",
+      "セリフ",
+      "キャスト",
+      "演技",
+      "お芝居"
+    ]
+  },
+  "entries": [
+    {
+      "term": "陽高真白",
+      "scope": "common",
+      "aliases": [
+        "日高真白",
+        "日高ましろ",
+        "陽高ましろ",
+        "ひだかましろ",
+        "ヒダカマシロ"
+      ]
+    },
+    {
+      "term": "長月あおい",
+      "scope": "common",
+      "aliases": [
+        "長月葵",
+        "ながつきあおい",
+        "ナガツキアオイ"
+      ]
+    },
+    {
+      "term": "小鹿なお",
+      "scope": "common",
+      "aliases": [
+        "小鹿奈緒",
+        "おじかなお",
+        "オジカナオ"
+      ]
+    },
+    {
+      "term": "飯田ヒカル",
+      "scope": "common",
+      "aliases": [
+        "飯田ひかる",
+        "飯田光",
+        "いいだひかる",
+        "イイダヒカル"
+      ]
+    },
+    {
+      "term": "七瀬つむぎ",
+      "scope": "common",
+      "aliases": [
+        "七瀬紬",
+        "ななせつむぎ",
+        "ナナセツムギ"
+      ]
+    },
+    {
+      "term": "花岩香奈",
+      "scope": "common",
+      "aliases": [
+        "花岩かな",
+        "はないわかな",
+        "ハナイワカナ"
+      ]
+    },
+    {
+      "term": "伊藤舞音",
+      "scope": "common",
+      "aliases": [
+        "伊藤まお",
+        "いとうまお",
+        "イトウマオ"
+      ]
+    },
+    {
+      "term": "湊みや",
+      "scope": "common",
+      "aliases": [
+        "湊ミヤ",
+        "みなとみや",
+        "ミナトミヤ"
+      ]
+    },
+    {
+      "term": "薄井友里",
+      "scope": "common",
+      "aliases": [
+        "薄井ゆり",
+        "臼井友里",
+        "うすいゆり",
+        "ウスイユリ"
+      ]
+    },
+    {
+      "term": "小森結梨",
+      "scope": "common",
+      "aliases": [
+        "小森ゆり",
+        "こもりゆり",
+        "コモリユリ"
+      ]
+    },
+    {
+      "term": "春咲暖",
+      "scope": "common",
+      "aliases": [
+        "春咲だん",
+        "はるさきだん",
+        "ハルサキダン"
+      ]
+    },
+    {
+      "term": "花海咲季",
+      "scope": "gakumas",
+      "aliases": [
+        "花見咲季",
+        "花海サキ",
+        "はなみさき",
+        "ハナミサキ"
+      ]
+    },
+    {
+      "term": "月村手毬",
+      "scope": "gakumas",
+      "aliases": [
+        "月村手鞠",
+        "月村てまり",
+        "つきむらてまり",
+        "ツキムラテマリ"
+      ]
+    },
+    {
+      "term": "藤田ことね",
+      "scope": "gakumas",
+      "aliases": [
+        "藤田琴音",
+        "ふじたことね",
+        "フジタコトネ"
+      ]
+    },
+    {
+      "term": "有村麻央",
+      "scope": "gakumas",
+      "aliases": [
+        "有村真央",
+        "有村まお",
+        "ありむらまお",
+        "アリムラマオ"
+      ]
+    },
+    {
+      "term": "葛城リーリヤ",
+      "scope": "gakumas",
+      "aliases": [
+        "葛城リーニヤ",
+        "葛城リーリア",
+        "かつらぎりーりや",
+        "カツラギリーリヤ"
+      ]
+    },
+    {
+      "term": "倉本千奈",
+      "scope": "gakumas",
+      "aliases": [
+        "倉本ちな",
+        "倉本チナ",
+        "くらもとちな",
+        "クラモトチナ"
+      ]
+    },
+    {
+      "term": "紫雲清夏",
+      "scope": "gakumas",
+      "aliases": [
+        "紫雲すみか",
+        "紫雲澄香",
+        "しうんすみか",
+        "シウンスミカ"
+      ]
+    },
+    {
+      "term": "篠澤広",
+      "scope": "gakumas",
+      "aliases": [
+        "篠沢広",
+        "篠澤ひろ",
+        "しのさわひろ",
+        "シノサワヒロ"
+      ]
+    },
+    {
+      "term": "花海佑芽",
+      "scope": "gakumas",
+      "aliases": [
+        "花海うめ",
+        "花見佑芽",
+        "はなみうめ",
+        "ハナミウメ"
+      ]
+    },
+    {
+      "term": "十王星南",
+      "scope": "gakumas",
+      "aliases": [
+        "十王せな",
+        "十王セナ",
+        "じゅうおうせな",
+        "ジュウオウセナ"
+      ]
+    },
+    {
+      "term": "秦谷美鈴",
+      "scope": "gakumas",
+      "aliases": [
+        "秦谷みすず",
+        "畑谷美鈴",
+        "はたやみすず",
+        "ハタヤミスズ"
+      ]
+    },
+    {
+      "term": "賀陽燐羽",
+      "scope": "gakumas",
+      "aliases": [
+        "賀陽りんは",
+        "かやりんは",
+        "カヤリンハ"
+      ]
+    },
+    {
+      "term": "学園アイドルマスター",
+      "scope": "gakumas",
+      "aliases": [
+        "学園アイドルマスタ",
+        "学園アイドルマスターズ",
+        "がくえんあいどるますたー",
+        "ガクエンアイドルマスター"
+      ]
+    },
+    {
+      "term": "学マス",
+      "scope": "gakumas",
+      "aliases": [
+        "学ます",
+        "ガクマス",
+        "がくます"
+      ]
+    },
+    {
+      "term": "初星学園",
+      "scope": "gakumas",
+      "aliases": [
+        "初星学院",
+        "はつぼし学園",
+        "はつぼしがくえん",
+        "ハツボシガクエン"
+      ]
+    },
+    {
+      "term": "初星コミュ",
+      "scope": "gakumas",
+      "aliases": [
+        "初星コミュー",
+        "はつぼしこみゅ",
+        "ハツボシコミュ"
+      ]
+    },
+    {
+      "term": "Fighting My Way",
+      "scope": "gakumas",
+      "aliases": [
+        "ファイティングマイウェイ",
+        "ふぁいてぃんぐまいうぇい"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "Luna say maybe",
+      "scope": "gakumas",
+      "aliases": [
+        "ルナセイメイビー",
+        "るなせいめいびー"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "世界一可愛い私",
+      "scope": "gakumas",
+      "aliases": [
+        "世界一かわいい私",
+        "せかいいちかわいいわたし",
+        "セカイイチカワイイワタシ"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "Tame-Lie-One-Step",
+      "scope": "gakumas",
+      "aliases": [
+        "タメライワンステップ",
+        "ためらいわんすてっぷ"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "Wonder Scale",
+      "scope": "gakumas",
+      "aliases": [
+        "わんだーすけーる",
+        "ワンダースケール"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "clumsy trick",
+      "scope": "gakumas",
+      "aliases": [
+        "くらむじーとりっく",
+        "クラムジートリック"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "The Rolling Riceball",
+      "scope": "gakumas",
+      "aliases": [
+        "ざろーりんぐらいすぼーる",
+        "ザローリングライスボール"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "Campus mode!!",
+      "scope": "gakumas",
+      "aliases": [
+        "キャンパスモード",
+        "きゃんぱすもーど"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "アイヴイ",
+      "scope": "gakumas",
+      "aliases": [
+        "アイビー",
+        "あいゔい"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "白線",
+      "scope": "gakumas",
+      "aliases": [
+        "はくせん",
+        "ハクセン"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "光景",
+      "scope": "gakumas",
+      "aliases": [
+        "こうけい",
+        "コウケイ"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "ツキノカメ",
+      "scope": "gakumas",
+      "aliases": [
+        "月のカメ",
+        "月の亀",
+        "つきのかめ"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "羊宮妃那",
+      "scope": "common",
+      "aliases": [
+        "羊宮ひな",
+        "羊宮妃奈",
+        "ようみやひな",
+        "ヨウミヤヒナ"
+      ]
+    },
+    {
+      "term": "立石凛",
+      "scope": "common",
+      "aliases": [
+        "立石りん",
+        "たていしりん",
+        "タテイシリン"
+      ]
+    },
+    {
+      "term": "青木陽菜",
+      "scope": "common",
+      "aliases": [
+        "青木ひな",
+        "あおきひな",
+        "アオキヒナ"
+      ]
+    },
+    {
+      "term": "小日向美香",
+      "scope": "common",
+      "aliases": [
+        "小日向みか",
+        "こひなたみか",
+        "コヒナタミカ"
+      ]
+    },
+    {
+      "term": "林鼓子",
+      "scope": "common",
+      "aliases": [
+        "林ここ",
+        "はやしここ",
+        "ハヤシココ"
+      ]
+    },
+    {
+      "term": "佐々木李子",
+      "scope": "common",
+      "aliases": [
+        "佐々木りこ",
+        "ささきりこ",
+        "ササキリコ"
+      ]
+    },
+    {
+      "term": "渡瀬結月",
+      "scope": "common",
+      "aliases": [
+        "渡瀬ゆづき",
+        "わたせゆづき",
+        "ワタセユヅキ"
+      ]
+    },
+    {
+      "term": "岡田夢以",
+      "scope": "common",
+      "aliases": [
+        "岡田めい",
+        "おかだめい",
+        "オカダメイ"
+      ]
+    },
+    {
+      "term": "米澤茜",
+      "scope": "common",
+      "aliases": [
+        "米沢茜",
+        "よねざわあかね",
+        "ヨネザワアカネ"
+      ]
+    },
+    {
+      "term": "高尾奏音",
+      "scope": "common",
+      "aliases": [
+        "高尾かのん",
+        "たかおかのん",
+        "タカオカノン"
+      ]
+    },
+    {
+      "term": "相羽あいな",
+      "scope": "common",
+      "aliases": [
+        "相葉あいな",
+        "あいばあいな",
+        "アイバアイナ"
+      ]
+    },
+    {
+      "term": "工藤晴香",
+      "scope": "common",
+      "aliases": [
+        "工藤はるか",
+        "くどうはるか",
+        "クドウハルカ"
+      ]
+    },
+    {
+      "term": "中島由貴",
+      "scope": "common",
+      "aliases": [
+        "中島ゆき",
+        "なかしまゆき",
+        "ナカシマユキ"
+      ]
+    },
+    {
+      "term": "櫻川めぐ",
+      "scope": "common",
+      "aliases": [
+        "桜川めぐ",
+        "さくらがわめぐ",
+        "サクラガワメグ"
+      ]
+    },
+    {
+      "term": "志崎樺音",
+      "scope": "common",
+      "aliases": [
+        "志崎かのん",
+        "しざきかのん",
+        "シザキカノン"
+      ]
+    },
+    {
+      "term": "大塚紗英",
+      "scope": "common",
+      "aliases": [
+        "大塚さえ",
+        "おおつかさえ",
+        "オオツカサエ"
+      ]
+    },
+    {
+      "term": "大橋彩香",
+      "scope": "common",
+      "aliases": [
+        "大橋あやか",
+        "おおはしあやか",
+        "オオハシアヤカ"
+      ]
+    },
+    {
+      "term": "伊藤彩沙",
+      "scope": "common",
+      "aliases": [
+        "伊藤あやさ",
+        "いとうあやさ",
+        "イトウアヤサ"
+      ]
+    },
+    {
+      "term": "戸山香澄",
+      "scope": "common",
+      "aliases": [
+        "戸山かすみ",
+        "とやまかすみ",
+        "トヤマカスミ"
+      ]
+    },
+    {
+      "term": "湊友希那",
+      "scope": "common",
+      "aliases": [
+        "湊ゆきな",
+        "みなとゆきな",
+        "ミナトユキナ"
+      ]
+    },
+    {
+      "term": "高松燈",
+      "scope": "common",
+      "aliases": [
+        "高松灯",
+        "高松ともり",
+        "たかまつともり",
+        "タカマツトモリ"
+      ]
+    },
+    {
+      "term": "千早愛音",
+      "scope": "common",
+      "aliases": [
+        "千早あのん",
+        "ちはやあのん",
+        "チハヤアノン"
+      ]
+    },
+    {
+      "term": "要楽奈",
+      "scope": "common",
+      "aliases": [
+        "要らーな",
+        "かなめらーな",
+        "カナメラーナ"
+      ]
+    },
+    {
+      "term": "長崎そよ",
+      "scope": "common",
+      "aliases": [
+        "ながさきそよ",
+        "ナガサキソヨ"
+      ]
+    },
+    {
+      "term": "椎名立希",
+      "scope": "common",
+      "aliases": [
+        "椎名たき",
+        "しいなたき",
+        "シイナタキ"
+      ]
+    },
+    {
+      "term": "三角初華",
+      "scope": "common",
+      "aliases": [
+        "三角ういか",
+        "みすみういか",
+        "ミスミウイカ"
+      ]
+    },
+    {
+      "term": "若葉睦",
+      "scope": "common",
+      "aliases": [
+        "若葉むつみ",
+        "わかばむつみ",
+        "ワカバムツミ"
+      ]
+    },
+    {
+      "term": "八幡海鈴",
+      "scope": "common",
+      "aliases": [
+        "八幡うみり",
+        "やはたうみり",
+        "ヤハタウミリ"
+      ]
+    },
+    {
+      "term": "祐天寺にゃむ",
+      "scope": "common",
+      "aliases": [
+        "ゆうてんじにゃむ",
+        "ユウテンジニャム"
+      ]
+    },
+    {
+      "term": "豊川祥子",
+      "scope": "common",
+      "aliases": [
+        "豊川さきこ",
+        "豊川しょうこ",
+        "とがわさきこ",
+        "トガワサキコ"
+      ]
+    },
+    {
+      "term": "BanG Dream!",
+      "scope": "common",
+      "aliases": [
+        "バングドリーム",
+        "ばんぐどりーむ"
+      ],
+      "requires": [
+        "bandori",
+        "song"
+      ]
+    },
+    {
+      "term": "バンドリ",
+      "scope": "common",
+      "aliases": [
+        "ばんどり"
+      ],
+      "requires": [
+        "bandori",
+        "song"
+      ]
+    },
+    {
+      "term": "Poppin'Party",
+      "scope": "common",
+      "aliases": [
+        "ポッピンパーティー",
+        "ぽっぴんぱーてぃー",
+        "Poppin’Party"
+      ],
+      "requires": [
+        "bandori",
+        "song"
+      ]
+    },
+    {
+      "term": "Roselia",
+      "scope": "common",
+      "aliases": [
+        "ロゼリア",
+        "ろぜりあ"
+      ],
+      "requires": [
+        "bandori",
+        "song"
+      ]
+    },
+    {
+      "term": "RAISE A SUILEN",
+      "scope": "common",
+      "aliases": [
+        "レイズアスイレン",
+        "れいずあすいれん"
+      ],
+      "requires": [
+        "bandori",
+        "song"
+      ]
+    },
+    {
+      "term": "Morfonica",
+      "scope": "common",
+      "aliases": [
+        "もるふぉにか",
+        "モルフォニカ"
+      ],
+      "requires": [
+        "bandori",
+        "song"
+      ]
+    },
+    {
+      "term": "MyGO!!!!!",
+      "scope": "common",
+      "aliases": [
+        "マイゴー",
+        "まいご",
+        "マイゴ"
+      ],
+      "requires": [
+        "bandori",
+        "song"
+      ]
+    },
+    {
+      "term": "Ave Mujica",
+      "scope": "common",
+      "aliases": [
+        "アヴェムジカ",
+        "アベムジカ",
+        "あべむじか"
+      ],
+      "requires": [
+        "bandori",
+        "song"
+      ]
+    },
+    {
+      "term": "Pastel＊Palettes",
+      "scope": "common",
+      "aliases": [
+        "パステルパレット",
+        "ぱすてるぱれっつ",
+        "パステルパレッツ"
+      ],
+      "requires": [
+        "bandori",
+        "song"
+      ]
+    },
+    {
+      "term": "Afterglow",
+      "scope": "common",
+      "aliases": [
+        "あふたーぐろう",
+        "アフターグロウ"
+      ],
+      "requires": [
+        "bandori",
+        "song"
+      ]
+    },
+    {
+      "term": "壱雫空",
+      "scope": "common",
+      "aliases": [
+        "ひとしずく",
+        "ヒトシズク"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "春日影",
+      "scope": "common",
+      "aliases": [
+        "はるひかげ",
+        "ハルヒカゲ"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "迷星叫",
+      "scope": "common",
+      "aliases": [
+        "まよいうた",
+        "マヨイウタ"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "碧天伴走",
+      "scope": "common",
+      "aliases": [
+        "へきてんばんそう",
+        "ヘキテンバンソウ"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "詩超絆",
+      "scope": "common",
+      "aliases": [
+        "うたことば",
+        "ウタコトバ"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "影色舞",
+      "scope": "common",
+      "aliases": [
+        "かげいろまい",
+        "カゲイロマイ"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "伊波杏樹",
+      "scope": "common",
+      "aliases": [
+        "伊波あんじゅ",
+        "いなみあんじゅ",
+        "イナミアンジュ"
+      ]
+    },
+    {
+      "term": "逢田梨香子",
+      "scope": "common",
+      "aliases": [
+        "逢田りかこ",
+        "相田梨香子",
+        "あいだりかこ",
+        "アイダリカコ"
+      ]
+    },
+    {
+      "term": "諏訪ななか",
+      "scope": "common",
+      "aliases": [
+        "すわななか",
+        "スワナナカ"
+      ]
+    },
+    {
+      "term": "小宮有紗",
+      "scope": "common",
+      "aliases": [
+        "小宮ありさ",
+        "こみやありさ",
+        "コミヤアリサ"
+      ]
+    },
+    {
+      "term": "斉藤朱夏",
+      "scope": "common",
+      "aliases": [
+        "斉藤しゅか",
+        "斎藤朱夏",
+        "さいとうしゅか",
+        "サイトウシュカ"
+      ]
+    },
+    {
+      "term": "小林愛香",
+      "scope": "common",
+      "aliases": [
+        "小林あいか",
+        "こばやしあいか",
+        "コバヤシアイカ"
+      ]
+    },
+    {
+      "term": "高槻かなこ",
+      "scope": "common",
+      "aliases": [
+        "たかつきかなこ",
+        "タカツキカナコ"
+      ]
+    },
+    {
+      "term": "鈴木愛奈",
+      "scope": "common",
+      "aliases": [
+        "鈴木あいな",
+        "すずきあいな",
+        "スズキアイナ"
+      ]
+    },
+    {
+      "term": "降幡愛",
+      "scope": "common",
+      "aliases": [
+        "降幡あい",
+        "ふりはたあい",
+        "フリハタアイ"
+      ]
+    },
+    {
+      "term": "伊達さゆり",
+      "scope": "common",
+      "aliases": [
+        "だてさゆり",
+        "ダテサユリ"
+      ]
+    },
+    {
+      "term": "岬なこ",
+      "scope": "common",
+      "aliases": [
+        "みさきなこ",
+        "ミサキナコ"
+      ]
+    },
+    {
+      "term": "ペイトン尚未",
+      "scope": "common",
+      "aliases": [
+        "ペイトンなおみ",
+        "ぺいとんなおみ",
+        "ペイトンナオミ"
+      ]
+    },
+    {
+      "term": "青山なぎさ",
+      "scope": "common",
+      "aliases": [
+        "あおやまなぎさ",
+        "アオヤマナギサ"
+      ]
+    },
+    {
+      "term": "鈴原希実",
+      "scope": "common",
+      "aliases": [
+        "鈴原のぞみ",
+        "すずはらのぞみ",
+        "スズハラノゾミ"
+      ]
+    },
+    {
+      "term": "薮島朱音",
+      "scope": "common",
+      "aliases": [
+        "藪島朱音",
+        "薮島あかね",
+        "やぶしまあかね",
+        "ヤブシマアカネ"
+      ]
+    },
+    {
+      "term": "大熊和奏",
+      "scope": "common",
+      "aliases": [
+        "大熊わかな",
+        "おおくまわかな",
+        "オオクマワカナ"
+      ]
+    },
+    {
+      "term": "絵森彩",
+      "scope": "common",
+      "aliases": [
+        "絵森あや",
+        "えもりあや",
+        "エモリアヤ"
+      ]
+    },
+    {
+      "term": "坂倉花",
+      "scope": "common",
+      "aliases": [
+        "坂倉さくら",
+        "さかくらさくら",
+        "サカクラサクラ"
+      ]
+    },
+    {
+      "term": "楠木ともり",
+      "scope": "common",
+      "aliases": [
+        "くすのきともり",
+        "クスノキトモリ"
+      ]
+    },
+    {
+      "term": "矢野妃菜喜",
+      "scope": "common",
+      "aliases": [
+        "矢野ひなき",
+        "やのひなき",
+        "ヤノヒナキ"
+      ]
+    },
+    {
+      "term": "大西亜玖璃",
+      "scope": "common",
+      "aliases": [
+        "大西あぐり",
+        "おおにしあぐり",
+        "オオニシアグリ"
+      ]
+    },
+    {
+      "term": "鬼頭明里",
+      "scope": "common",
+      "aliases": [
+        "鬼頭あかり",
+        "きとうあかり",
+        "キトウアカリ"
+      ]
+    },
+    {
+      "term": "ラブライブ",
+      "scope": "common",
+      "aliases": [
+        "ラブライヴ",
+        "らぶらいぶ"
+      ]
+    },
+    {
+      "term": "虹ヶ咲学園",
+      "scope": "common",
+      "aliases": [
+        "虹が咲学園",
+        "虹ヶ崎学園",
+        "にじがさきがくえん",
+        "ニジガサキガクエン"
+      ]
+    },
+    {
+      "term": "蓮ノ空",
+      "scope": "common",
+      "aliases": [
+        "蓮の空",
+        "蓮乃空",
+        "はすのそら",
+        "ハスノソラ"
+      ]
+    },
+    {
+      "term": "μ's",
+      "scope": "common",
+      "aliases": [
+        "ミューズ",
+        "みゅーず",
+        "μ’s"
+      ],
+      "requires": [
+        "lovelive",
+        "song"
+      ]
+    },
+    {
+      "term": "Aqours",
+      "scope": "common",
+      "aliases": [
+        "アクア",
+        "あくあ"
+      ],
+      "requires": [
+        "lovelive",
+        "song"
+      ]
+    },
+    {
+      "term": "Liella!",
+      "scope": "common",
+      "aliases": [
+        "リエラ",
+        "りえら"
+      ],
+      "requires": [
+        "lovelive",
+        "song"
+      ]
+    },
+    {
+      "term": "DOLLCHESTRA",
+      "scope": "common",
+      "aliases": [
+        "どるけすとら",
+        "ドルケストラ"
+      ],
+      "requires": [
+        "lovelive",
+        "song"
+      ]
+    },
+    {
+      "term": "みらくらぱーく！",
+      "scope": "common",
+      "aliases": [
+        "ミラクラパーク",
+        "みらくらぱーく"
+      ],
+      "requires": [
+        "lovelive",
+        "song"
+      ]
+    },
+    {
+      "term": "Snow halation",
+      "scope": "common",
+      "aliases": [
+        "すのーはれーしょん",
+        "スノーハレーション"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "青空Jumping Heart",
+      "scope": "common",
+      "aliases": [
+        "あおぞらじゃんぴんぐはーと",
+        "アオゾラジャンピングハート"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "未来予報ハレルヤ！",
+      "scope": "common",
+      "aliases": [
+        "みらいよほうはれるや",
+        "ミライヨホウハレルヤ"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "常夏☆サンシャイン",
+      "scope": "common",
+      "aliases": [
+        "とこなつさんしゃいん",
+        "トコナツサンシャイン"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "佐倉綾音",
+      "scope": "common",
+      "aliases": [
+        "さくらあやね",
+        "サクラアヤネ"
+      ]
+    },
+    {
+      "term": "水瀬いのり",
+      "scope": "common",
+      "aliases": [
+        "みなせいのり",
+        "ミナセイノリ"
+      ]
+    },
+    {
+      "term": "花澤香菜",
+      "scope": "common",
+      "aliases": [
+        "はなざわかな",
+        "ハナザワカナ"
+      ]
+    },
+    {
+      "term": "早見沙織",
+      "scope": "common",
+      "aliases": [
+        "はやみさおり",
+        "ハヤミサオリ"
+      ]
+    },
+    {
+      "term": "内田真礼",
+      "scope": "common",
+      "aliases": [
+        "うちだまあや",
+        "ウチダマアヤ"
+      ]
+    },
+    {
+      "term": "上坂すみれ",
+      "scope": "common",
+      "aliases": [
+        "うえさかすみれ",
+        "ウエサカスミレ"
+      ]
+    },
+    {
+      "term": "高橋李依",
+      "scope": "common",
+      "aliases": [
+        "たかはしりえ",
+        "タカハシリエ"
+      ]
+    },
+    {
+      "term": "悠木碧",
+      "scope": "common",
+      "aliases": [
+        "ゆうきあおい",
+        "ユウキアオイ"
+      ]
+    },
+    {
+      "term": "東山奈央",
+      "scope": "common",
+      "aliases": [
+        "とうやまなお",
+        "トウヤマナオ"
+      ]
+    },
+    {
+      "term": "雨宮天",
+      "scope": "common",
+      "aliases": [
+        "あまみやそら",
+        "アマミヤソラ"
+      ]
+    },
+    {
+      "term": "アフレコ",
+      "scope": "common",
+      "aliases": [
+        "あふれこ"
+      ]
+    },
+    {
+      "term": "生放送",
+      "scope": "common",
+      "aliases": [
+        "生包装"
+      ],
+      "requires": [
+        "broadcast"
+      ]
+    },
+    {
+      "term": "生配信",
+      "scope": "common",
+      "aliases": [
+        "生発信"
+      ],
+      "requires": [
+        "broadcast"
+      ]
+    },
+    {
+      "term": "台本",
+      "scope": "common",
+      "aliases": [
+        "大本"
+      ],
+      "requires": [
+        "recording"
+      ]
+    },
+    {
+      "term": "セトリ",
+      "scope": "common",
+      "aliases": [
+        "せとり"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "リリイベ",
+      "scope": "common",
+      "aliases": [
+        "りりいべ"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "残酷な天使のテーゼ",
+      "scope": "common",
+      "aliases": [
+        "ざんこくなてんしのてーぜ",
+        "ザンコクナテンシノテーゼ"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "only my railgun",
+      "scope": "common",
+      "aliases": [
+        "おんりーまいれーるがん",
+        "オンリーマイレールガン"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "コネクト",
+      "scope": "common",
+      "aliases": [
+        "こねくと"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "紅蓮華",
+      "scope": "common",
+      "aliases": [
+        "ぐれんげ",
+        "グレンゲ"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "廻廻奇譚",
+      "scope": "common",
+      "aliases": [
+        "かいかいきたん",
+        "カイカイキタン"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "可愛くてごめん",
+      "scope": "common",
+      "aliases": [
+        "かわいくてごめん",
+        "カワイクテゴメン"
+      ],
+      "requires": [
+        "song"
+      ]
+    },
+    {
+      "term": "川村玲奈",
+      "scope": "common",
+      "aliases": [
+        "川村れいな",
+        "かわむられいな",
+        "カワムラレイナ"
+      ]
+    },
+    {
+      "term": "松田彩音",
+      "scope": "common",
+      "aliases": [
+        "松田あやね",
+        "まつだあやね",
+        "マツダアヤネ"
+      ]
+    },
+    {
+      "term": "姫崎莉波",
+      "scope": "gakumas",
+      "aliases": [
+        "姫崎りなみ",
+        "ひめさきりなみ",
+        "ヒメサキリナミ"
+      ]
+    },
+    {
+      "term": "楡井希実",
+      "scope": "common",
+      "aliases": [
+        "楡井のぞみ",
+        "にれいのぞみ",
+        "ニレイノゾミ"
+      ]
+    },
+    {
+      "term": "野中ここな",
+      "scope": "common",
+      "aliases": [
+        "のなかここな",
+        "ノナカココナ"
+      ]
+    },
+    {
+      "term": "花宮初奈",
+      "scope": "common",
+      "aliases": [
+        "花宮うい",
+        "はなみやうい",
+        "ハナミヤウイ"
+      ]
+    },
+    {
+      "term": "佐々木琴子",
+      "scope": "common",
+      "aliases": [
+        "佐々木ことこ",
+        "ささきことこ",
+        "ササキコトコ"
+      ]
+    },
+    {
+      "term": "菅叶和",
+      "scope": "common",
+      "aliases": [
+        "菅かんな",
+        "かんかんな",
+        "カンカンナ"
+      ]
+    },
+    {
+      "term": "月音こな",
+      "scope": "common",
+      "aliases": [
+        "つきねこな",
+        "ツキネコナ"
+      ]
+    },
+    {
+      "term": "新田恵海",
+      "scope": "common",
+      "aliases": [
+        "新田えみ",
+        "にったえみ",
+        "ニッタエミ"
+      ]
+    },
+    {
+      "term": "南條愛乃",
+      "scope": "common",
+      "aliases": [
+        "南条愛乃",
+        "なんじょうよしの",
+        "ナンジョウヨシノ"
+      ]
+    },
+    {
+      "term": "内田彩",
+      "scope": "common",
+      "aliases": [
+        "内田あや",
+        "うちだあや",
+        "ウチダアヤ"
+      ]
+    },
+    {
+      "term": "三森すずこ",
+      "scope": "common",
+      "aliases": [
+        "みもりすずこ",
+        "ミモリスズコ"
+      ]
+    },
+    {
+      "term": "徳井青空",
+      "scope": "common",
+      "aliases": [
+        "徳井そら",
+        "とくいそら",
+        "トクイソラ"
+      ]
+    },
+    {
+      "term": "久保ユリカ",
+      "scope": "common",
+      "aliases": [
+        "久保ゆりか",
+        "くぼゆりか",
+        "クボユリカ"
+      ]
+    },
+    {
+      "term": "楠田亜衣奈",
+      "scope": "common",
+      "aliases": [
+        "楠田あいな",
+        "くすだあいな",
+        "クスダアイナ"
+      ]
+    },
+    {
+      "term": "飯田里穂",
+      "scope": "common",
+      "aliases": [
+        "飯田りほ",
+        "いいだりほ",
+        "イイダリホ"
+      ]
+    },
+    {
+      "term": "朗読劇",
+      "scope": "common",
+      "aliases": [
+        "朗読激",
+        "ろうどくげき",
+        "ロウドクゲキ"
+      ]
+    },
+    {
+      "term": "舞台挨拶",
+      "scope": "common",
+      "aliases": [
+        "舞台あいさつ",
+        "ぶたいあいさつ",
+        "ブタイアイサツ"
+      ]
+    },
+    {
+      "term": "公開収録",
+      "scope": "common",
+      "aliases": [
+        "こうかいしゅうろく",
+        "コウカイシュウロク"
+      ]
+    },
+    {
+      "term": "アフタートーク",
+      "scope": "common",
+      "aliases": [
+        "あふたーとーく"
+      ]
+    },
+    {
+      "term": "オーディション",
+      "scope": "common",
+      "aliases": [
+        "おーでぃしょん"
+      ]
+    },
+    {
+      "term": "キャラソン",
+      "scope": "common",
+      "aliases": [
+        "きゃらそん"
+      ]
+    },
+    {
+      "term": "アニソン",
+      "scope": "common",
+      "aliases": [
+        "あにそん"
+      ]
+    },
+    {
+      "term": "ドラマCD",
+      "scope": "common",
+      "aliases": [
+        "どらましーでぃー",
+        "ドラマシーディー"
+      ]
+    },
+    {
+      "term": "歌枠",
+      "scope": "common",
+      "aliases": [
+        "歌わく",
+        "うたわく",
+        "ウタワク"
+      ],
+      "requires": [
+        "broadcast",
+        "song"
+      ]
+    },
+    {
+      "term": "同時視聴",
+      "scope": "common",
+      "aliases": [
+        "どうじしちょう",
+        "ドウジシチョウ"
+      ]
+    },
+    {
+      "term": "お渡し会",
+      "scope": "common",
+      "aliases": [
+        "お渡し回",
+        "おわたしかい",
+        "オワタシカイ"
+      ],
+      "requires": [
+        "broadcast",
+        "song"
+      ]
+    }
+  ]
+}

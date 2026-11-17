@@ -1,5 +1,6 @@
 """Preview ASR must not send incomplete sentences to the translation API."""
 import asyncio
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -19,7 +20,7 @@ class TranslationTimingTests(unittest.IsolatedAsyncioTestCase):
 
         async def chat(request):
             requests.append(await request.json())
-            return web.json_response({"choices": [{"message": {"content": "今天介绍东京的天气，下午可能下雨。"}}]})
+            return web.json_response({"choices": [{"finish_reason": "stop", "message": {"content": "今天介绍东京的天气，下午可能下雨。"}}]})
 
         app = web.Application()
         app.router.add_post('/chat/completions', chat)
@@ -55,7 +56,7 @@ class TranslationTimingTests(unittest.IsolatedAsyncioTestCase):
                 await session._finalize(audio, 3.0)
                 await asyncio.wait_for(session._translate_task, timeout=2)
                 self.assertEqual(len(requests), 1)
-                user_text = [m['content'] for m in requests[0]['messages'] if m['role'] == 'user']
+                user_text = [json.loads(m['content'])['current'] for m in requests[0]['messages'] if m['role'] == 'user']
                 self.assertEqual(user_text, [final_text])
                 translations = [e for e in events if e['type'] == 'translation']
                 self.assertEqual(len(translations), 1)

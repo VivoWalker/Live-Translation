@@ -13,7 +13,7 @@ function fixture() {
     setTimer: (fn, delay) => { timers.set(++next, { fn, at: now + delay }); return next; },
     clearTimer: id => timers.delete(id),
   });
-  return { timeline, timers, advance(ms) {
+  return { timeline, timers, jump(ms) { now += ms; }, advance(ms) {
     const end = now + ms;
     while (true) {
       const candidate = [...timers].filter(([, timer]) => timer.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
@@ -42,15 +42,14 @@ test('several short sentences cannot evict a long translation before its reading
   complete(timeline, 2, '好'); complete(timeline, 3, '谢谢'); complete(timeline, 4, '再见');
   assert.deepEqual(Array.from(timeline.visible, e => e.id), [1, 2]);
   assert.deepEqual(Array.from(timeline.pending, e => e.id), [3, 4]);
-  advance(3100);
-  assert.deepEqual(Array.from(timeline.visible, e => e.id), [1, 3]);
-  assert.equal(timeline.entries.get(1).deadline, deadline);
-  advance(3100);
-  assert.deepEqual(Array.from(timeline.visible, e => e.id), [1, 4]);
-  advance(deadline - 6200 - 1);
-  assert(timeline.visible.some(e => e.id === 1));
+  advance(deadline - 1);
+  assert.deepEqual(Array.from(timeline.visible, e => e.id), [1, 2]);
   advance(2);
-  assert(!timeline.visible.some(e => e.id === 1));
+  assert.deepEqual(Array.from(timeline.visible, e => e.id), [2, 3]);
+  advance(598);
+  assert(timeline.visible.some(e => e.id === 2), 'later short sentence must remain through the earlier exit');
+  advance(2);
+  assert.deepEqual(Array.from(timeline.visible, e => e.id), [3, 4]);
 });
 
 test('a queued translation receives its full reading time when it becomes visible', () => {
@@ -96,10 +95,11 @@ test('out-of-order API responses preserve the sentence order without resetting r
   const { timeline, advance } = fixture();
   timeline.text(1, 'final', '最初の句');
   complete(timeline, 2, '第二句先到');
-  const originalDeadline = timeline.entries.get(2).deadline;
+  const originalDeadline = timeline.entries.get(2).readUntil;
   advance(500); timeline.translation(1, '第一句后到', true);
   assert.deepEqual(Array.from(timeline.visible, entry => entry.id), [1, 2]);
-  assert.equal(timeline.entries.get(2).deadline, originalDeadline);
+  assert.equal(timeline.entries.get(2).readUntil, originalDeadline);
+  assert(timeline.entries.get(2).deadline > timeline.entries.get(1).deadline);
   assert.equal(timeline.currentId, 2);
 });
 
@@ -133,6 +133,15 @@ test('public style preferences accept only known, bounded values', () => {
   assert.equal(captionPreferences(null).fontSize, 24);
 });
 
+test('an overdue timer still dismisses the earlier sentence before the later short one', () => {
+  const { timeline, advance, jump } = fixture();
+  complete(timeline, 1, '前一句较长，需要先读完。'.repeat(3)); complete(timeline, 2, '好');
+  jump(30000); timeline.tick();
+  assert.deepEqual(Array.from(timeline.visible, entry => entry.id), [2]);
+  advance(599); assert.equal(timeline.visible.length, 1);
+  advance(2); assert.equal(timeline.visible.length, 0);
+});
+
 test('final Japanese survives the next sentence and reading begins only after translation arrives', () => {
   const { timeline, advance } = fixture();
   timeline.text(1, 'partial', '今日は東京の');
@@ -157,7 +166,7 @@ test('a queued final keeps the preview until it can display its translated row',
   timeline.translation(3, '正在等待翻译。', true);
   assert.equal(timeline.preview().id, 3);
   advance(3001);
-  assert.equal(timeline.visible[0].id, 3);
+  assert(timeline.visible.some(entry => entry.id === 3));
   assert.equal(timeline.preview(), null);
 });
 

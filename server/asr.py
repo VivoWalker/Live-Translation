@@ -9,6 +9,9 @@ from typing import Protocol
 import numpy as np
 import sherpa_onnx
 
+from .asr_domain import DomainCorrector
+from .text import normalize_ja
+
 SAMPLE_RATE = 16000
 
 
@@ -118,7 +121,10 @@ class _OfflineRecognizer:
             stream = self._rec.create_stream()
             stream.accept_waveform(SAMPLE_RATE, audio)
             self._rec.decode_stream(stream)
-            return (stream.result.text or "").strip()
+            text = (stream.result.text or "").strip()
+        if self.language == "ja":
+            text = self.domain.correct(normalize_ja(text))
+        return text
 
 
 class SenseVoiceRecognizer(_OfflineRecognizer):
@@ -128,7 +134,9 @@ class SenseVoiceRecognizer(_OfflineRecognizer):
     partial_interval = 0.6
     min_partial_speech = 0.9
 
-    def __init__(self, model_dir: str | None = None, language: str = "ja", num_threads: int = 4):
+    def __init__(self, model_dir: str | None = None, language: str = "ja", num_threads: int = 4,
+                 asr_domain: str = "gakumas", asr_terms: str | None = None):
+        self.domain = DomainCorrector(asr_domain, asr_terms)
         model_dir = resolve_model_dir(model_dir)
         self.model_dir = model_dir
         self.language = language
@@ -149,7 +157,9 @@ class WhisperRecognizer(_OfflineRecognizer):
     partial_interval = 2.0
     min_partial_speech = 2.0
 
-    def __init__(self, model_dir: str | None = None, language: str = "ja", num_threads: int = 4):
+    def __init__(self, model_dir: str | None = None, language: str = "ja", num_threads: int = 4,
+                 asr_domain: str = "gakumas", asr_terms: str | None = None):
+        self.domain = DomainCorrector(asr_domain, asr_terms)
         directory, prefix = resolve_whisper_model(model_dir)
         self.model_dir = str(directory)
         self.name = f"whisper-{prefix}-int8"
@@ -168,13 +178,15 @@ class WhisperRecognizer(_OfflineRecognizer):
 
 
 def create_recognizer(engine: str = "sensevoice", model_dir: str | None = None,
-                      language: str = "ja", num_threads: int = 4) -> Recognizer:
+                      language: str = "ja", num_threads: int = 4,
+                      asr_domain: str = "gakumas", asr_terms: str | None = None) -> Recognizer:
     if num_threads < 1:
         raise ValueError("ASR threads must be at least 1")
     backends = {"sensevoice": SenseVoiceRecognizer, "whisper": WhisperRecognizer}
     if engine not in backends:
         raise ValueError(f"Unknown ASR backend: {engine}")
-    return backends[engine](model_dir=model_dir, language=language, num_threads=num_threads)
+    return backends[engine](model_dir=model_dir, language=language, num_threads=num_threads,
+                            asr_domain=asr_domain, asr_terms=asr_terms)
 
 
 class SileroVad:

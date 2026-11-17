@@ -153,7 +153,7 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
             calls.append(await request.json())
             entered.set()
             await release.wait()
-            return web.json_response({'choices': [{'message': {'content': '成功'}}]})
+            return web.json_response({'choices': [{'finish_reason': 'stop', 'message': {'content': '成功'}}]})
         fake_app = web.Application()
         fake_app.router.add_post('/chat/completions', translate)
         fake = TestServer(fake_app)
