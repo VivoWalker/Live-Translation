@@ -90,6 +90,7 @@ class StreamSession:
         self._final_context = ""
         self._last_decode_ms = 0.0
         self._translate_task: asyncio.Task | None = None
+        self._translate_seg_id: int | None = None
         self._task: asyncio.Task | None = None
         self._closed = False
 
@@ -208,6 +209,8 @@ class StreamSession:
             return
         if running:
             self._translate_task.cancel()
+            self._emit({"type": "translation_cancelled", "id": self._translate_seg_id})
+        self._translate_seg_id = seg_id
         self._translate_task = asyncio.create_task(self._translate(seg_id, text, final))
 
     async def _emit_partial(self) -> None:

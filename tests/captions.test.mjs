@@ -132,3 +132,43 @@ test('public style preferences accept only known, bounded values', () => {
   assert.equal(prefs.apiKey, undefined);
   assert.equal(captionPreferences(null).fontSize, 24);
 });
+
+test('final Japanese survives the next sentence and reading begins only after translation arrives', () => {
+  const { timeline, advance } = fixture();
+  timeline.text(1, 'partial', '今日は東京の');
+  timeline.text(1, 'final', '今日は東京の天気についてお話しします。');
+  assert.equal(timeline.visible[0].ja, '今日は東京の天気についてお話しします。');
+  advance(12000); timeline.start(2); timeline.text(2, 'partial', '午後から');
+  assert.equal(timeline.visible[0].id, 1);
+  timeline.text(1, 'partial', '古い下書き');
+  assert.equal(timeline.visible[0].ja, '今日は東京の天気についてお話しします。');
+  timeline.translation(1, '今天介绍东京的天气。', true);
+  const deadline = timeline.entries.get(1).deadline;
+  assert.equal(deadline, 12000 + captionReadingTime('今天介绍东京的天气。'));
+  advance(captionReadingTime('今天介绍东京的天气。') - 1);
+  assert.equal(timeline.visible[0].id, 1);
+});
+
+test('a queued final keeps the preview until it can display its translated row', () => {
+  const { timeline, advance } = fixture();
+  complete(timeline, 1, '好'); complete(timeline, 2, '好');
+  timeline.text(3, 'final', '翻訳を待っています。'); timeline.start(4);
+  assert.equal(timeline.preview().id, 3);
+  timeline.translation(3, '正在等待翻译。', true);
+  assert.equal(timeline.preview().id, 3);
+  advance(3001);
+  assert.equal(timeline.visible[0].id, 3);
+  assert.equal(timeline.preview(), null);
+});
+
+test('failed and missing responses cannot hold source-only rows forever', () => {
+  const { timeline, advance, timers } = fixture();
+  timeline.text(1, 'final', '翻訳に失敗しました。'); timeline.fail(1);
+  advance(captionReadingTime('翻訳に失敗しました。') + 1);
+  assert.equal(timeline.visible.length, 0);
+  timeline.text(2, 'final', '返事がありません。');
+  advance(60001); assert.equal(timeline.visible[0].failed, true);
+  advance(captionReadingTime('返事がありません。') + 1);
+  assert.equal(timeline.visible.length, 0);
+  assert.equal(timers.size, 0);
+});

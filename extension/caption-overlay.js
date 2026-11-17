@@ -57,9 +57,24 @@
     text(id, kind, ja) {
       const entry = this.entry(id);
       if (!entry || entry.retired) return;
+      if (entry.kind === 'final' && kind !== 'final') return;
       entry.ja = String(ja || '');
       entry.kind = kind;
+      if (kind === 'final' && entry.ja) this.enqueue(entry);
       this.start(id);
+    }
+    enqueue(entry) {
+      if (!this.visible.includes(entry) && !this.pending.includes(entry)) {
+        this.pending.push(entry);
+        this.pending.sort((a, b) => a.order - b.order);
+      }
+      this.fill();
+    }
+    beginReading(entry) {
+      entry.shownAt = this.now();
+      entry.deadline = entry.zh || entry.failed
+        ? entry.shownAt + readingTime(entry.zh || entry.ja, this.cps)
+        : entry.shownAt + 60000; // Beyond the translator's retries; never block a slot forever.
     }
     translation(id, text, final = true) {
       if (!text || final === false) return;
@@ -68,20 +83,23 @@
       const changed = entry.zh !== text;
       entry.zh = String(text);
       entry.kind = 'final';
+      entry.failed = false;
       if (this.visible.includes(entry)) {
-        if (changed) { entry.shownAt = this.now(); entry.deadline = entry.shownAt + readingTime(entry.zh, this.cps); }
-      } else if (!this.pending.includes(entry)) {
-        this.pending.push(entry);
-        this.pending.sort((a, b) => a.order - b.order);
-      }
-      this.fill();
+        if (changed) this.beginReading(entry);
+      } else this.enqueue(entry);
+      this.changed();
+    }
+    fail(id) {
+      const entry = this.entries.get(id);
+      if (!entry || entry.retired || entry.zh || entry.failed) return;
+      entry.failed = true;
+      if (this.visible.includes(entry)) this.beginReading(entry);
       this.changed();
     }
     fill() {
       while (this.visible.length < 2 && this.pending.length) {
         const entry = this.pending.shift();
-        entry.shownAt = this.now();
-        entry.deadline = entry.shownAt + readingTime(entry.zh, this.cps);
+        this.beginReading(entry);
         this.visible.push(entry);
       }
       this.visible.sort((a, b) => a.order - b.order);
@@ -96,13 +114,14 @@
         if (!protectedEntries.has(entry) && id !== this.currentId) this.entries.delete(id);
       }
       while (this.pending.length > 32) {
-        const old = this.pending.shift();
+        const [old] = this.pending.splice(1, 1); // Keep the Japanese currently shown in the preview.
         old.retired = true;
         this.entries.delete(old.id);
       }
       this.onChange();
-      if (this.pauseAt === null && this.visible.length) {
-        const deadline = Math.min(...this.visible.map(entry => entry.deadline));
+      const deadlines = this.visible.map(entry => entry.deadline).filter(Number.isFinite);
+      if (this.pauseAt === null && deadlines.length) {
+        const deadline = Math.min(...deadlines);
         this.timer = this.setTimer(() => this.tick(), Math.max(1, deadline - this.now()));
       }
     }
@@ -111,6 +130,7 @@
       const now = this.now();
       this.visible = this.visible.filter(entry => {
         if (entry.deadline > now) return true;
+        if (!entry.zh && !entry.failed) { entry.failed = true; this.beginReading(entry); return true; }
         entry.retired = true;
         return false;
       });
@@ -121,6 +141,7 @@
       if (on && this.pauseAt === null) this.pauseAt = this.now();
       else if (!on && this.pauseAt !== null) {
         for (const entry of this.visible) {
+          if (!Number.isFinite(entry.deadline)) continue;
           const elapsed = this.now() - Math.max(this.pauseAt, entry.shownAt);
           entry.deadline += elapsed; entry.shownAt += elapsed;
         }
@@ -130,7 +151,9 @@
     }
     speed(cps) {
       this.cps = cps;
-      for (const entry of this.visible) entry.deadline = entry.shownAt + readingTime(entry.zh, cps);
+      for (const entry of this.visible) {
+        if (entry.zh || entry.failed) entry.deadline = entry.shownAt + readingTime(entry.zh || entry.ja, cps);
+      }
       this.changed();
     }
     catchUp() {
@@ -141,6 +164,12 @@
       this.pending = [latest];
       this.fill();
       this.changed();
+    }
+    preview() {
+      const waiting = this.pending.find(entry => entry.ja && !entry.retired);
+      if (waiting) return waiting;
+      const current = this.entries.get(this.currentId);
+      return current && !current.retired && !this.visible.includes(current) && current.ja ? current : null;
     }
     clear() {
       this.clearTimer(this.timer);
@@ -190,7 +219,10 @@
     .grip { letter-spacing: -2px; font-size: 17px; opacity: .65; }
     .toolbar .spacer { flex: 1; }
     .catch-up[hidden], [hidden] { display: none !important; }
-    .rows { max-height: min(46vh, 420px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+    .rows { max-height: min(46vh, 420px); overflow-y: auto; overflow-x: hidden;
+      overscroll-behavior: contain; overflow-anchor: none; scrollbar-width: none; }
+    .rows::-webkit-scrollbar { display: none; width: 0; height: 0; }
+    .rows:focus-visible { outline: 1px solid #9bbdff80; outline-offset: 3px; border-radius: 8px; }
     .row { padding: 3px 0 8px; overflow-wrap: anywhere; }
     .row + .row { border-top: 1px solid #ffffff12; padding-top: 10px; }
     .ja { color: #edf2fc; font-size: calc(var(--font-size) * .69); line-height: 1.5; opacity: .76;
@@ -199,9 +231,8 @@
       letter-spacing: .012em; margin-top: 3px; -webkit-text-stroke: .35px #0008;
       paint-order: stroke fill; text-shadow: 0 1px 3px #000, 0 2px 10px #000c;
       transition: font-size .32s cubic-bezier(.22,1,.36,1), color .25s ease; }
-    .prev .zh { font-size: calc(var(--font-size) * .92); }
     .live { padding: 4px 0 0; }
-    .live .ja { font-size: calc(var(--font-size) * .72); opacity: .8; }
+    .live .ja { font-size: calc(var(--font-size) * .69); opacity: .76; }
     .no-ja .ja { display: none; }
     .meta { max-height: 0; overflow: hidden; opacity: 0; color: #a9b9d0;
       font-size: 11px; transition: opacity .25s ease, max-height .3s ease; }
@@ -252,7 +283,7 @@
         <button class="catch-up" type="button" hidden title="跳过待读译文，显示最新一句">回到实时</button>
         <button class="settings-toggle" type="button" aria-expanded="false" aria-controls="jls-settings">⚙ 字幕样式</button>
       </div>
-      <div class="rows" role="log" aria-label="译文" aria-live="polite" aria-relevant="additions text"></div>
+      <div class="rows" role="log" tabindex="0" aria-label="字幕，可滚动阅读" aria-live="polite" aria-relevant="additions text"></div>
       <div class="live" aria-live="off"><div class="ja jls-ja"></div></div>
       <div class="meta jls-meta"></div>
       <div class="settings" id="jls-settings" hidden>
@@ -281,13 +312,21 @@
     const catchUp = root.querySelector('.catch-up');
     const reduced = matchMedia('(prefers-reduced-motion: reduce)');
     const rendered = new Map();
+    const animations = new Set();
     let prefs = preferences();
     let hovered = false, keyboard = false, pointerFocus = false, drag = null, destroyed = false, revision = 0;
     let pillTimer = null, saveTimer = null, leaveTimer = null;
 
     function motion(node, frames, duration) {
       if (reduced.matches || !node.animate) return null;
-      return node.animate(frames, { duration, easing: 'cubic-bezier(.22,1,.36,1)', fill: 'none' });
+      const animation = node.animate(frames, { duration, easing: 'cubic-bezier(.22,1,.36,1)', fill: 'none' });
+      animations.add(animation);
+      animation.finished.then(() => animations.delete(animation), () => animations.delete(animation));
+      return animation;
+    }
+    function cancelAnimations() {
+      for (const animation of animations) animation.cancel();
+      animations.clear();
     }
     function position() {
       if (!prefs.position || drag) return;
@@ -319,35 +358,42 @@
       }
       timeline.visible.forEach((entry, index) => {
         let row = rendered.get(entry.id);
+        let entering = false;
         if (!row) {
           row = document.createElement('article');
           row.innerHTML = '<div class="ja jls-ja"></div><div class="zh jls-zh"></div>';
           row.dataset.id = String(entry.id);
           rendered.set(entry.id, row);
-          row.dataset.entering = 'true';
+          entering = true;
         }
         row.className = 'row jls-row ' + (index === timeline.visible.length - 1 ? 'cur jls-cur' : 'prev jls-prev');
+        row.setAttribute('aria-busy', String(!entry.zh && !entry.failed));
         const ja = row.querySelector('.ja');
         if (ja.textContent !== entry.ja) ja.textContent = entry.ja;
         const zh = row.querySelector('.zh');
+        const firstTranslation = !zh.textContent && !!entry.zh;
+        const oldHeight = row.isConnected ? row.getBoundingClientRect().height : 0;
         if (zh.textContent !== entry.zh) zh.textContent = entry.zh;
-        if (row.dataset.entering) {
-          delete row.dataset.entering;
+        zh.hidden = !entry.zh;
+        if (entering) {
           const nextRow = timeline.visible.slice(index + 1).map(item => rendered.get(item.id)).find(item => item?.parentNode === rows);
           rows.insertBefore(row, nextRow || null);
+          // Final Japanese must not fade out and re-enter while waiting for MT.
+          // Only a new translation receives a fade; its source row stays opaque.
+        }
+        if (firstTranslation) {
           const height = row.getBoundingClientRect().height;
-          const computed = getComputedStyle(row);
-          row.style.overflow = 'hidden';
-          const animation = motion(row, [
-            { opacity: 0, height: '0px', paddingTop: 0, paddingBottom: 0, transform: 'translateY(10px)', filter: 'blur(2px)' },
-            { opacity: 1, height: height + 'px', paddingTop: computed.paddingTop, paddingBottom: computed.paddingBottom, transform: 'none', filter: 'blur(0px)' },
-          ], 440);
-          if (animation) animation.finished.catch(() => {}).then(() => row.style.removeProperty('overflow'));
-          else row.style.removeProperty('overflow');
+          if (oldHeight && height > oldHeight) {
+            row.style.overflow = 'hidden';
+            const animation = motion(row, [{ height: oldHeight + 'px' }, { height: height + 'px' }], 360);
+            if (animation) animation.finished.catch(() => {}).then(() => row.style.removeProperty('overflow'));
+            else row.style.removeProperty('overflow');
+          }
+          motion(zh, [{ opacity: 0, transform: 'translateY(5px)' }, { opacity: 1, transform: 'none' }], 360);
         }
       });
-      const current = timeline.entries.get(timeline.currentId);
-      const showLive = prefs.showJa && current && !current.retired && !timeline.visible.includes(current) && current.ja;
+      const current = timeline.preview();
+      const showLive = prefs.showJa && current;
       live.hidden = !showLive;
       live.querySelector('.ja').textContent = showLive ? current.ja : '';
       root.classList.toggle('empty', !timeline.visible.length && !showLive && !meta.classList.contains('err'));
@@ -484,7 +530,7 @@
     const onResize = () => { position(); placePanel(); };
     const onVisibility = () => engagement();
     const onMotionPreference = () => {
-      if (reduced.matches) for (const animation of root.getAnimations({ subtree: true })) animation.cancel();
+      if (reduced.matches) cancelAnimations();
     };
     const onFullscreen = () => { if (host.parentNode !== mountPoint()) mountPoint().appendChild(host); onResize(); };
     global.addEventListener('resize', onResize);
@@ -503,6 +549,7 @@
       start(id) { root.classList.remove('hidden'); timeline.start(id); },
       text(id, kind, text) { root.classList.remove('hidden'); timeline.text(id, kind, text); },
       translation(id, text, final) { root.classList.remove('hidden'); timeline.translation(id, text, final); },
+      translationFailed(id) { timeline.fail(id); },
       show() { root.classList.remove('hidden'); },
       hide() { root.classList.add('hidden'); },
       setMeta(text, error) { meta.textContent = text || ''; meta.classList.toggle('err', !!error); render(); },
@@ -511,18 +558,21 @@
         clearTimeout(pillTimer); pillTimer = setTimeout(() => pill.classList.remove('on'), 4000);
       },
       clear() {
+        cancelAnimations();
         endDrag(); hovered = keyboard = false; clearTimeout(leaveTimer);
         panel.hidden = bridge.hidden = true; toggle.setAttribute('aria-expanded', 'false'); root.classList.remove('engaged');
         meta.textContent = ''; meta.classList.remove('err'); timeline.clear(); timeline.pause(document.hidden);
         rows.replaceChildren(); rendered.clear(); live.hidden = true; root.classList.add('empty');
+        cancelAnimations();
       },
       get currentId() { return timeline.currentId; },
       get captionText() {
-        const current = timeline.visible.at(-1), previous = timeline.visible.at(-2), source = timeline.entries.get(timeline.currentId);
-        const liveSource = source && !source.retired && !timeline.visible.includes(source) ? source.ja : '';
+        const current = timeline.visible.at(-1), previous = timeline.visible.at(-2), source = timeline.preview();
+        const liveSource = source?.ja || '';
         return { ja: prefs.showJa ? liveSource || current?.ja || '' : '', zh: current?.zh || '', prevJa: prefs.showJa ? previous?.ja || '' : '', prevZh: previous?.zh || '', meta: meta.textContent };
       },
       destroy() {
+        cancelAnimations();
         destroyed = true; timeline.clear(); clearTimeout(pillTimer); clearTimeout(saveTimer); clearTimeout(leaveTimer); resize.disconnect();
         global.removeEventListener('resize', onResize); document.removeEventListener('visibilitychange', onVisibility);
         global.removeEventListener('pointerup', endDrag, true); global.removeEventListener('blur', endDrag);

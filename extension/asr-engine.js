@@ -129,8 +129,9 @@
       scripts.set(src, new Promise((resolve, reject) => {
         const script = document.createElement('script');
         script.src = src;
-        script.onload = resolve;
-        script.onerror = () => { scripts.delete(src); reject(new Error('无法加载 ' + src)); };
+        const cleanup = () => { script.onload = script.onerror = null; script.remove(); };
+        script.onload = () => { cleanup(); resolve(); };
+        script.onerror = () => { cleanup(); scripts.delete(src); reject(new Error('无法加载 ' + src)); };
         document.head.appendChild(script);
       }));
     }
@@ -170,7 +171,7 @@
           const buffer = await verified(await hit.arrayBuffer(), PACKAGE_SHA256);
           emit({ type: 'model-cache', saved: true, warning: false, message: '识别模型已保存在本地，无需重新下载。' });
           progress('识别模型已缓存，正在加载…');
-          return { url: URL.createObjectURL(new Blob([buffer])), meta: PACKAGE_META };
+          return { url: URL.createObjectURL(new Blob([buffer])), meta: PACKAGE_META, owned: true };
         } catch (error) {
           cacheError = error;
           if (error.name === 'ModelIntegrityError') {
@@ -204,7 +205,7 @@
       const reason = error.name === 'QuotaExceededError' ? '本地存储空间不足' : '浏览器未能写入本地缓存';
       emit({ type: 'model-cache', saved: false, warning: true, message: `模型可以用于本次识别，但${reason}；重开浏览器可能需要重新下载。` });
     }
-    return { url: URL.createObjectURL(blob), meta };
+    return { url: URL.createObjectURL(blob), meta, owned: true };
   }
 
   // ------------------------------------------------------------ text helpers
@@ -227,7 +228,7 @@
     if (epoch !== generation) return;
     if (!text) return;
     if (!apiKey) {
-      emit({ type: 'error', scope: 'translate', message: '未填写 DeepSeek API Key' });
+      emit({ type: 'error', scope: 'translate', id, message: '未填写 DeepSeek API Key' });
       return;
     }
     const controller = new AbortController();
@@ -264,7 +265,7 @@
       if (isFinal) finalContext = text;
       emit({ type: 'translation', id, final: isFinal, text: out, engine: 'deepseek', ms });
     } catch (e) {
-      if (epoch === generation) emit({ type: 'error', scope: 'translate', message: '翻译失败：' + (e.message || e) });
+      if (epoch === generation) emit({ type: 'error', scope: 'translate', id, message: '翻译失败：' + (e.message || e) });
     } finally {
       clearTimeout(timeout);
       pendingRequests.delete(controller);
@@ -311,10 +312,12 @@
   function decode(samples) {
     const t0 = performance.now();
     const stream = recognizer.createStream();
-    stream.acceptWaveform(SAMPLE_RATE, samples);
-    recognizer.decode(stream);
-    const text = recognizer.getResult(stream).text || '';
-    stream.free();
+    let text;
+    try {
+      stream.acceptWaveform(SAMPLE_RATE, samples);
+      recognizer.decode(stream);
+      text = recognizer.getResult(stream).text || '';
+    } finally { stream.free(); }
     lastDecodeMs = performance.now() - t0;
     decodeMsTotal += lastDecodeMs;
     // Under load, back off instead of falling behind: previews get sparser but
@@ -420,30 +423,34 @@
         const pkg = config.packageUrl
           ? { url: config.packageUrl, meta: config.packageMeta || (await (await fetch(config.packageMetaUrl)).json()) }
           : await buildPackage(progress);
-        const wasmBase = baseUrl() + 'wasm/';
-        let resolveRuntime, rejectRuntime;
-        const initialized = new Promise((resolve, reject) => { resolveRuntime = resolve; rejectRuntime = reject; });
-        initialized.catch(() => {});
-        const module = window.Module = {
-          locateFile: path => path.endsWith('.data') ? pkg.url : wasmBase + path,
-          print: text => { if (text) progress(String(text)); },
-          printErr: text => { if (text) progress(String(text)); },
-          setStatus: text => { if (text) progress(String(text)); },
-          onRuntimeInitialized: () => resolveRuntime(module),
-          onAbort: reason => rejectRuntime(new Error(String(reason))),
-        };
-        if (pkg.meta) module._dataPackageMetadata = pkg.meta;
-        progress('加载识别运行时…');
-        // Define wrappers before a cached model can initialize the runtime.
-        await loadScript(wasmBase + 'sherpa-onnx-asr.js');
-        await loadScript(wasmBase + 'sherpa-onnx-vad.js');
-        await loadScript(wasmBase + 'sherpa-onnx-wasm-main-vad-asr.js');
-        let timeout;
         try {
-          return await Promise.race([initialized, new Promise((_, reject) => {
-            timeout = setTimeout(() => reject(new Error('识别运行时加载超时')), 300000);
-          })]);
-        } finally { clearTimeout(timeout); }
+          const wasmBase = baseUrl() + 'wasm/';
+          let resolveRuntime, rejectRuntime;
+          const initialized = new Promise((resolve, reject) => { resolveRuntime = resolve; rejectRuntime = reject; });
+          initialized.catch(() => {});
+          const module = window.Module = {
+            locateFile: path => path.endsWith('.data') ? pkg.url : wasmBase + path,
+            print: text => { if (text) progress(String(text)); },
+            printErr: text => { if (text) progress(String(text)); },
+            setStatus: text => { if (text) progress(String(text)); },
+            onRuntimeInitialized: () => resolveRuntime(module),
+            onAbort: reason => rejectRuntime(new Error(String(reason))),
+          };
+          if (pkg.meta) module._dataPackageMetadata = pkg.meta;
+          progress('加载识别运行时…');
+          // Define wrappers before a cached model can initialize the runtime.
+          await loadScript(wasmBase + 'sherpa-onnx-asr.js');
+          await loadScript(wasmBase + 'sherpa-onnx-vad.js');
+          await loadScript(wasmBase + 'sherpa-onnx-wasm-main-vad-asr.js');
+          let timeout;
+          try {
+            return await Promise.race([initialized, new Promise((_, reject) => {
+              timeout = setTimeout(() => reject(new Error('识别运行时加载超时')), 300000);
+            })]);
+          } finally { clearTimeout(timeout); }
+        } finally {
+          if (pkg.owned) URL.revokeObjectURL(pkg.url);
+        }
       })().catch(error => {
         scripts.delete(baseUrl() + 'wasm/sherpa-onnx-wasm-main-vad-asr.js');
         runtimePromise = null;

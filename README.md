@@ -72,6 +72,8 @@ WASM 版明显更吃 CPU（1/4–1/2 核，取决于窗口长度和机器负载�
 
 0.4.0 更新字幕框交互：鼠标移入时底板加深，显示「移动」手柄与「字幕样式」；只有手柄会拖动字幕框，方向键也可微调位置。可以调整字号、宽度、颜色、日语原文、离开时的背景浓度和阅读速度，设置在扩展内保存、跨网站复用。移开后工具栏收起、底板淡化，文字保留描边与阴影以保证亮色画面上的可读性。阅读计时在悬停、键盘操作或页面不可见时暂停，字幕进出采用缓动动画，并遵循系统「减少动态效果」设置。更新后重新加载扩展并刷新视频页。
 
+0.4.1 修复等待翻译时日语原文消失的问题：识别完成后保留同一字幕行，中文回来时只让译文渐入，阅读时长从译文实际显示起算。上下句使用相同字号，滚动条隐藏但仍支持滚轮和键盘阅读，避免高度动画触发横向重排。停止字幕时取消动画；识别异常、初始化失败和正常加载后均回收对应 stream、临时模型 URL 和脚本节点。
+
 ### 3.2 本地服务（可选）
 
 ```powershell
@@ -137,7 +139,7 @@ python tools/test_asr.py testdata/ja_nanami.mp3 --asr sensevoice --threads 2
 
 ## 5. 协议（服务模式）
 
-客户端 → 服务端：第一条消息必须是 `{"type":"auth","token":"<访问令牌>"}`，认证成功后服务端发送 `ready`，再接受 `{"type":"config","target":"zh"}` 和二进制 float32 PCM 帧。认证等待最多 5 秒；每帧不超过 64 KiB，排队音频不超过 256 KiB，持续发送不超过 2 倍实时速率，最多 8 个连接。正常客户端使用 100 ms（6400 字节）的帧。服务端事件为 `ready / partial / final / translation / stats / error`。
+客户端 → 服务端：第一条消息必须是 `{"type":"auth","token":"<访问令牌>"}`，认证成功后服务端发送 `ready`，再接受 `{"type":"config","target":"zh"}` 和二进制 float32 PCM 帧。认证等待最多 5 秒；每帧不超过 64 KiB，排队音频不超过 256 KiB，持续发送不超过 2 倍实时速率，最多 8 个连接。正常客户端使用 100 ms（6400 字节）的帧。服务端事件为 `ready / partial / final / translation / translation_cancelled / stats / error`；`translation_cancelled` 带原句 `id`，让界面结束被取消请求的等待状态。
 
 命令行模拟器读取环境变量 `JLSUBS_ACCESS_TOKEN`，例如先在当前终端设置服务显示的令牌，再运行 `python tools/simulate.py testdata/ja_nanami.mp3 --speed 1`。令牌不会出现在 WebSocket URL 或 HTTP 查询日志中。
 
@@ -171,6 +173,10 @@ node --test tests/*.test.mjs
 ```
 
 JavaScript 测试需要 Node.js 22 或更新版本，覆盖启动取消、旧会话结果丢弃、模式转发和损坏模型拒绝。浏览器演示测试 `node tools/browser_check.mjs` 需设置 `JLS_CHROME` 和 `JLSUBS_ACCESS_TOKEN`；完整扩展测试仍需浏览器允许加载未打包扩展。
+
+`JLS_CHROME=/usr/bin/chromium node tools/content_check.mjs` 使用真实浏览器和本地消息桩验证字幕交互、延迟译文、无滚动条重排及原文连续显示。加 `--stress` 会模拟 10,000 条字幕和 100 次销毁重建，比较强制 GC 后的 JS 堆、DOM 和监听器数量；加 `--wasm` 会再用真实 SenseVoice 模型执行 24 次初始化、音频识别、翻译和停止，并检查末段内存是否稳定。`--wasm` 需要本地 `models/sensevoice-onnx` 与 `models/silero`，或已设置的 `DSH_HOME` 模型目录；翻译请求由本地桩响应，不使用真实 API Key。可用 `--report /tmp/caption-memory.json` 保存指标。短时加速压测用于发现持续增长，不代表无限时长下的内存保证；WASM 线性内存的高水位保留也应与泄漏区分。
+
+`--continuous` 在同一个 WASM 会话中连续识别 64 段真实音频，约 10 分钟 PCM 以加速方式发送，检查不中途停止时的 PCM 缓冲、JS 堆和 WASM 内存。该参数也需要上述本地模型，可以与 `--stress --wasm` 合用。
 
 已有本地模型时，可额外运行跨浏览器进程缓存回归测试：
 
