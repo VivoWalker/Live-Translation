@@ -5,7 +5,7 @@ Design constraints
 * Preview pacing follows the backend and measured decoding cost. Whisper
   needs longer windows and less frequent previews than SenseVoice.
 * Partials are cheap previews; finals come from Silero-VAD segments.
-* Translation only happens for finals plus throttled long partials.
+* Only finalized segments are translated; partials remain ASR previews.
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .asr import SAMPLE_RATE, SileroVad, Recognizer
-from .text import looks_complete, normalize_ja, stable_prefix
+from .text import normalize_ja, stable_prefix
 from .translate import TranslationPipeline
 from .security import MAX_BUFFERED_BYTES, MAX_FRAME_BYTES
 
@@ -24,8 +24,6 @@ VAD_FRAME = 512
 MAX_SEGMENT = 12.0
 MAX_WINDOW = 8.0
 KEEP_SECONDS = 20.0
-PARTIAL_TRANSLATE_EVERY = 2.0
-PARTIAL_TRANSLATE_MIN_CHARS = 10
 
 _TIMEOUT = object()
 
@@ -34,7 +32,6 @@ _TIMEOUT = object()
 class SessionConfig:
     target_lang: str = "zh"
     source_lang: str = "ja"
-    partial_translation: bool = True
 
 
 @dataclass
@@ -85,9 +82,9 @@ class StreamSession:
         self._speech = False
         self._seg_start = 0
         self._seg_id = 0
+        self._finalized_until = 0
         self._last_partial_at = 0.0
         self._last_partial_total = 0
-        self._last_partial_tr_at = 0.0
         self._last_hyp = ""
         self._last_text = ""
         self._final_context = ""
@@ -230,14 +227,8 @@ class StreamSession:
         self._emit(
             {"type": "partial", "id": self._seg_id, "text": text, "stable": stable, "t": round(end / SAMPLE_RATE, 2)}
         )
-        if (
-            self.cfg.partial_translation
-            and len(stable) >= PARTIAL_TRANSLATE_MIN_CHARS
-            and time.monotonic() - self._last_partial_tr_at >= PARTIAL_TRANSLATE_EVERY
-            and (looks_complete(stable) or len(stable) >= PARTIAL_TRANSLATE_MIN_CHARS + 6)
-        ):
-            self._last_partial_tr_at = time.monotonic()
-            self._schedule_translation(self._seg_id, stable, final=False)
+        # Preview text is provisional, even when it already has punctuation.
+        # Only _finalize submits text to the translator.
 
     async def _finalize(self, audio: np.ndarray, audio_end_ratio: float) -> None:
         if len(audio) < SAMPLE_RATE * 0.3:
@@ -278,7 +269,7 @@ class StreamSession:
             self._last_partial_at = time.monotonic()
             self._emit({"type": "speech_start", "id": self._seg_id})
         elif self._speech and not in_speech:
-            segments = self.vad.pop_segments()
+            segments = self.vad.pop_segments(since=self._finalized_until)
             self._speech = False
             if segments:
                 await self._finalize(segments[-1], self._total / SAMPLE_RATE)
@@ -291,6 +282,7 @@ class StreamSession:
         dur = (self._total - self._seg_start) / SAMPLE_RATE
         if dur >= MAX_SEGMENT:
             await self._finalize(self._slice(self._seg_start, self._total), self._total / SAMPLE_RATE)
+            self._finalized_until = self._total
         elif (dur >= self.asr.min_partial_speech
               and self._total > self._last_partial_total
               and time.monotonic() - self._last_partial_at >= max(
