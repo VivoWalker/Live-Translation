@@ -55,6 +55,7 @@
         ws.send(JSON.stringify({ type: 'config', target: targetEl.value }));
       };
       ws.onmessage = (ev) => {
+        if (state.ws !== ws) return;
         let msg;
         try {
           msg = JSON.parse(ev.data);
@@ -242,16 +243,7 @@
       state,
       ready: false,
       get captionText() {
-        const root = state.captions.root;
-        const cur = root.querySelector('.jls-cur');
-        const prev = root.querySelector('.jls-prev');
-        return {
-          ja: cur.querySelector('.jls-ja').textContent,
-          zh: cur.querySelector('.jls-zh').textContent,
-          prevJa: prev.querySelector('.jls-ja').textContent,
-          prevZh: prev.querySelector('.jls-zh').textContent,
-          meta: root.querySelector('.jls-meta').textContent,
-        };
+        return state.captions.captionText;
       },
     };
 

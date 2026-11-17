@@ -214,6 +214,8 @@ def build_app(state: AppState, *, dev_assets: bool = False) -> web.Application:
         name = request.match_info["name"]
         if name not in public_assets:
             raise web.HTTPNotFound()
+        if name == "captions.js":
+            return web.FileResponse(ROOT / "extension" / "caption-overlay.js")
         return web.FileResponse(WEB_DIR / "static" / name)
     app.router.add_get("/static/{name}", static_asset)
     if dev_assets:

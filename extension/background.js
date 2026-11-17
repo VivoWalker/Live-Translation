@@ -24,7 +24,7 @@ async function ensureOffscreen() {
 }
 async function ensureContentScript(tabId) {
   try { if ((await chrome.tabs.sendMessage(tabId, { type: 'jls:ping' }))?.ok) return; } catch {}
-  await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
+  await chrome.scripting.executeScript({ target: { tabId }, files: ['caption-overlay.js', 'content.js'] });
 }
 async function start(tabId, target, serverUrl, streamId, engine = 'browser', apiKey = '', serverToken = '') {
   await restored;
@@ -75,7 +75,32 @@ async function stop(silent, expectedSession) {
 function trustedPage(sender, path) {
   return sender.id === chrome.runtime.id && sender.url === chrome.runtime.getURL(path);
 }
+function captionSettings(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  const settings = {};
+  for (const [key, min, max] of [['fontSize', 16, 40], ['width', 40, 94], ['background', 0, 70], ['cps', 4, 10]]) {
+    if (Number.isFinite(source[key])) settings[key] = Math.min(max, Math.max(min, source[key]));
+  }
+  if (typeof source.showJa === 'boolean') settings.showJa = source.showJa;
+  if (typeof source.color === 'string' && /^#[\da-f]{6}$/i.test(source.color)) settings.color = source.color;
+  if (source.position && Number.isFinite(source.position.x) && Number.isFinite(source.position.y)) {
+    settings.position = { x: Math.min(1, Math.max(0, source.position.x)), y: Math.min(1, Math.max(0, source.position.y)) };
+  }
+  return settings;
+}
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (['jls:caption-settings-get', 'jls:caption-settings-set'].includes(msg.type)) {
+    if (sender.id !== chrome.runtime.id || !sender.tab) return false;
+    (async () => {
+      if (msg.type === 'jls:caption-settings-set') {
+        await chrome.storage.local.set({ jlsCaptionPrefs: captionSettings(msg.settings) });
+        return { ok: true };
+      }
+      const saved = await chrome.storage.local.get('jlsCaptionPrefs');
+      return { settings: captionSettings(saved.jlsCaptionPrefs) };
+    })().then(sendResponse).catch(() => sendResponse({ ok: false }));
+    return true;
+  }
   if (['jls:start', 'jls:stop', 'jls:query'].includes(msg.type)) {
     if (!trustedPage(sender, 'popup.html')) return false;
     (async () => {

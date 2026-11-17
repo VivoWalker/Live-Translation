@@ -52,7 +52,7 @@ WASM 版明显更吃 CPU（1/4–1/2 核，取决于窗口长度和机器负载�
 ```
 
 * **音频**：`tabCapture` 抓标签页声音 → 一路以**原生采样率**接回扬声器（tabCapture 会让标签页静音，必须回放），另一路进 16 kHz 上下文做识别。两条独立 AudioContext，避免识别用的 16 kHz 把播放音质削掉。
-* **字幕稳定**：partial 只是预览；VAD 判定静音后出 final。上一句留在上面一行，新句在下面识别，译文不会被瞬间顶掉。
+* **字幕阅读**：partial 只更新实时日语预览；译文有独立的阅读计时，按字数保留 3–24 秒（默认约 6 字/秒），同时最多显示两条译文。后续短句不会提前顶掉长句；等待的译文获得展示空间后才开始计时，排队时可点「回到实时」跳到最新一句。
 * **翻译**：只翻译 final；partial 仅更新日语识别预览，不调用 DeepSeek。上下文（上一句）只放在 system 消息里，避免模型把两句合并。
 
 ## 3. 安装
@@ -69,6 +69,8 @@ WASM 版明显更吃 CPU（1/4–1/2 核，取决于窗口长度和机器负载�
 0.3.2 修复了扩展缓存键被解析成 `chrome-extension://`、导致 Cache API 写入失败的问题。现在使用合法的 HTTPS 缓存索引（仅本地索引，不会访问该地址），并申请 `unlimitedStorage` 保护约 240 MB 的模型免受配额和回收影响。更新后在原有扩展条目点击“重新加载”，保持原目录和扩展 ID；卸载或改换扩展 ID 后，旧缓存可能不再可见。旧版本没保存成功的模型仍需下载一次。
 
 0.3.3 移除了浏览器内模式和本地服务的预览翻译，避免一句话的前半部分和完整句子先后提交给 DeepSeek。日语预览仍实时显示，译文等 VAD 判定停顿、确认最终分段后再生成；连续长语音仍保留 12 秒分段上限，停顿后只翻译尚未提交的剩余音频。旧客户端发送的 `partial_translation` 配置不再启用预览翻译。更新后重新加载扩展并重新开始字幕；本地服务模式还需重启 Python 服务。
+
+0.4.0 更新字幕框交互：鼠标移入时底板加深，显示「移动」手柄与「字幕样式」；只有手柄会拖动字幕框，方向键也可微调位置。可以调整字号、宽度、颜色、日语原文、离开时的背景浓度和阅读速度，设置在扩展内保存、跨网站复用。移开后工具栏收起、底板淡化，文字保留描边与阴影以保证亮色画面上的可读性。阅读计时在悬停、键盘操作或页面不可见时暂停，字幕进出采用缓动动画，并遵循系统「减少动态效果」设置。更新后重新加载扩展并刷新视频页。
 
 ### 3.2 本地服务（可选）
 
@@ -149,6 +151,7 @@ ja-live-subs/
 │  ├─ popup.*               模式、Key、状态
 │  ├─ offscreen.*           tabCapture + 双 AudioContext + 引擎调用
 │  ├─ asr-engine.js         浏览器内 SenseVoice（WASM）+ VAD + 分段 + 翻译
+│  ├─ caption-overlay.js    扩展与演示页共用的样式设置、阅读计时和动画
 │  ├─ wasm/                 sherpa-onnx WASM 运行时（12 MB）
 │  └─ content.js            双语字幕层
 ├─ server/                  Python 服务（可选模式 + 演示页）
@@ -164,7 +167,7 @@ ja-live-subs/
 ```sh
 python -m pip install -r requirements.txt -r requirements-dev.txt
 python -m unittest discover -s tests -v
-node --test tests/extension.test.mjs
+node --test tests/*.test.mjs
 ```
 
 JavaScript 测试需要 Node.js 22 或更新版本，覆盖启动取消、旧会话结果丢弃、模式转发和损坏模型拒绝。浏览器演示测试 `node tools/browser_check.mjs` 需设置 `JLS_CHROME` 和 `JLSUBS_ACCESS_TOKEN`；完整扩展测试仍需浏览器允许加载未打包扩展。

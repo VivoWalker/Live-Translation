@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ja-live-subs · 实时日语字幕",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "description": "本地 SenseVoice 识别日语，DeepSeek 翻译，在网页上叠加实时双语字幕。",
   "minimum_chrome_version": "116",
   "content_security_policy": {
@@ -23,7 +23,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "js": ["caption-overlay.js", "content.js"],
       "run_at": "document_idle",
       "all_frames": false
     }
