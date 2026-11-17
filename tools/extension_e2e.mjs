@@ -211,7 +211,7 @@ try {
   const overlayRaw = await evaluate(
     ws,
     pageSession,
-    `(() => { const h = document.getElementById('ja-live-subs-host'); if (!h || !h.shadowRoot) return 'none'; const r = h.shadowRoot; const cur = r.querySelector('.cur'); return JSON.stringify({ja: cur.querySelector('.ja').textContent, zh: cur.querySelector('.zh').textContent, visible: !r.querySelector('.wrap').classList.contains('hidden')}); })()`,
+    `(() => { const h = document.getElementById('ja-live-subs-host'); if (!h || !h.shadowRoot) return 'none'; const r = h.shadowRoot; const cur = r.querySelector('.cur'); return JSON.stringify({ja: cur?.querySelector('.ja').textContent || '', zh: cur?.querySelector('.zh').textContent || '', visible: !r.querySelector('.wrap').classList.contains('hidden')}); })()`,
     false
   );
   const overlay = overlayRaw === 'none' ? { ja: '', zh: '', visible: false } : JSON.parse(overlayRaw);

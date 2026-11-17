@@ -425,3 +425,39 @@ test('browser-mode popup starts without fetching a local service', async () => {
   assert.equal(calls, 0);
   assert.equal(sent.find(m => m.type === 'jls:start').engine, 'browser');
 });
+
+test('content scripts can persist only public caption preferences through the background', async () => {
+  let listener;
+  const values = { jlsApiKey: 'private-test-key', jlsCaptionPrefs: { fontSize: 26, color: '#eeeeff', apiKey: 'must-not-return' } };
+  const sandbox = vm.createContext({
+    chrome: {
+      runtime: { id: extensionId, getURL: extensionURL, onMessage: { addListener(fn) { listener = fn; } } },
+      storage: {
+        local: { setAccessLevel: async () => {}, get: async key => ({ [key]: values[key] }), set: async items => Object.assign(values, items) },
+        session: { get: async () => ({}) },
+      },
+      tabs: { onRemoved: { addListener() {} } },
+    },
+  });
+  vm.runInContext(read('background.js'), sandbox);
+  const sender = { id: extensionId, tab: { id: 1 }, url: 'https://video.example/watch' };
+  const ask = (message, from = sender) => new Promise(resolve => {
+    if (!listener(message, from, resolve)) resolve(null);
+  });
+  const saved = await ask({ type: 'jls:caption-settings-get' });
+  assert.equal(saved.settings.fontSize, 26);
+  assert.equal(saved.settings.apiKey, undefined);
+  assert.equal(saved.jlsApiKey, undefined);
+  await ask({ type: 'jls:caption-settings-set', settings: { fontSize: 999, width: -100, color: 'url(https://bad.invalid)', position: { x: -1, y: 2 }, jlsApiKey: 'overwrite' } });
+  assert.equal(values.jlsCaptionPrefs.fontSize, 40);
+  assert.equal(values.jlsCaptionPrefs.width, 40);
+  assert.equal(values.jlsCaptionPrefs.position.x, 0);
+  assert.equal(values.jlsCaptionPrefs.position.y, 1);
+  assert.equal(values.jlsCaptionPrefs.color, undefined);
+  assert.equal(values.jlsApiKey, 'private-test-key');
+  assert.equal(await ask({ type: 'jls:caption-settings-set', settings: { fontSize: 16 } }, { ...sender, id: 'foreign' }), null);
+  assert.equal(await ask({ type: 'jls:caption-settings-get' }, { id: extensionId }), null);
+  const manifest = JSON.parse(read('manifest.json'));
+  const scripts = manifest.content_scripts.find(entry => entry.js.includes('content.js')).js;
+  assert(scripts.indexOf('caption-overlay.js') >= 0 && scripts.indexOf('caption-overlay.js') < scripts.indexOf('content.js'));
+});
