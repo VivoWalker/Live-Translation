@@ -18,8 +18,6 @@
   const MAX_WINDOW_SEC = 7;
   const MAX_SEGMENT_SEC = 12;
   const KEEP_SEC = 20;
-  const PARTIAL_TRANSLATE_EVERY = 2500;
-  const PARTIAL_TRANSLATE_MIN = 10;
 
   const MODEL_FILES = [
     {
@@ -89,12 +87,12 @@
   let vadPending = new Float32Array(0);
   let segStart = 0;
   let segId = 0;
+  let finalizedUntil = 0;
   let speaking = false;
   let lastPartialAt = 0;
   let partialInterval = PARTIAL_INTERVAL;
   let lastHyp = '';
   let lastText = '';
-  let lastPartialTranslateAt = 0;
   let finalContext = '';
   let busy = false;
   let decodeMsTotal = 0;
@@ -335,9 +333,13 @@
     lastPartialAt = 0;
   }
 
-  function finishSegment(audio) {
+  function finishSegment(audio, start) {
     busy = true;
     try {
+      const end = start + audio.length;
+      audio = audio.subarray(Math.max(0, finalizedUntil - start));
+      finalizedUntil = Math.max(finalizedUntil, end);
+      if (audio.length < SAMPLE_RATE * 0.3) return;
       const text = decode(audio);
       if (!text) return;
       finals++;
@@ -375,7 +377,7 @@
         const seg = vad.front();
         const audio = seg.samples;
         vad.pop();
-        finishSegment(audio);
+        finishSegment(audio, seg.start);
       } else {
         resetSegment();
       }
@@ -385,7 +387,7 @@
     if (!speaking) return;
     const dur = (totalSamples - segStart) / SAMPLE_RATE;
     if (dur >= MAX_SEGMENT_SEC) {
-      finishSegment(slice(segStart, totalSamples));
+      finishSegment(slice(segStart, totalSamples), segStart);
       return;
     }
     const now = Date.now();
@@ -401,10 +403,8 @@
           lastHyp = text;
           lastText = text;
           emit({ type: 'partial', id: segId, text, stable, t: +(totalSamples / SAMPLE_RATE).toFixed(2) });
-          if (stable.length >= PARTIAL_TRANSLATE_MIN && now - lastPartialTranslateAt >= PARTIAL_TRANSLATE_EVERY) {
-            lastPartialTranslateAt = now;
-            scheduleTranslation(segId, stable, false);
-          }
+          // ASR previews can still change. Submit only the finalized segment
+          // to avoid translating the beginning of one sentence twice.
         }
       } finally {
         busy = false;
@@ -527,7 +527,7 @@
     apiKey = finalContext = lastHyp = lastText = '';
     chunks.length = 0;
     vadPending = new Float32Array(0);
-    totalSamples = segStart = segId = lastPartialAt = lastPartialTranslateAt = 0;
+    totalSamples = segStart = segId = lastPartialAt = finalizedUntil = 0;
     speaking = busy = false;
     partialInterval = PARTIAL_INTERVAL;
     decodeMsTotal = decodeCount = finals = translateCount = translateMsTotal = lastDecodeMs = 0;

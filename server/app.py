@@ -6,7 +6,7 @@ Protocol
 --------
 client -> server
     text  {"type":"auth","token":"<local access token>"} (first message)
-    text  {"type":"config","target":"zh","source":"ja","partial_translation":true}
+    text  {"type":"config","target":"zh","source":"ja"}
     bin   little-endian float32, 16 kHz mono PCM (max 64 KiB per frame)
     text  {"type":"ping"}
 server -> client
@@ -155,7 +155,6 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                         if target not in ("zh", "en"):
                             raise ValueError("Unsupported target language")
                         session.cfg.target_lang = target
-                        session.cfg.partial_translation = bool(data.get("partial_translation", True))
                         await ws.send_json({"type": "config", "ok": True, "target": target})
                     elif kind == "ping":
                         await ws.send_json({"type": "pong", "t": time.time()})

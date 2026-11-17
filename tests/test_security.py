@@ -23,7 +23,7 @@ class FakeVad:
     in_speech = False
     def accept(self, audio):
         pass
-    def pop_segments(self):
+    def pop_segments(self, since=0):
         return []
 
 

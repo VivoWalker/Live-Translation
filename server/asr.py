@@ -195,11 +195,16 @@ class SileroVad:
     def accept(self, audio: np.ndarray) -> None:
         self._vad.accept_waveform(audio)
 
-    def pop_segments(self) -> list[np.ndarray]:
+    def pop_segments(self, since: int = 0) -> list[np.ndarray]:
         out = []
         while not self._vad.empty():
             seg = self._vad.front
-            out.append(np.asarray(seg.samples, dtype=np.float32))
+            samples = np.asarray(seg.samples, dtype=np.float32)
+            # A long utterance may already have emitted a forced final. The
+            # detector still returns the whole utterance when silence arrives.
+            offset = max(0, since - seg.start)
+            if offset < len(samples):
+                out.append(samples[offset:])
             self._vad.pop()
         return out
 

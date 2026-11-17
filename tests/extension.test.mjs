@@ -119,21 +119,26 @@ test('stop during engine initialization stops media and suppresses late progress
   assert.equal(context.messages.some(m => m.event?.text === 'late private text'), false);
 });
 
-function engine({ runtimeReady = true, cache, fetcher, cryptoImpl = webcrypto } = {}) {
+function engine({ runtimeReady = true, cache, fetcher, cryptoImpl = webcrypto, clock } = {}) {
   let speech = true, moduleReady;
+  let hypothesis = 'PRIVATE_TAB_A';
+  let vadSegment = { samples: new Float32Array(9600), start: 0 };
+  const decodedAudio = [];
   const requests = [], events = [], scripts = [];
   const sandbox = vm.createContext({
-    console, crypto: cryptoImpl, performance, Date, Float32Array, Uint8Array, Blob, URL, Response,
+    console, crypto: cryptoImpl, performance,
+    Date: clock ? class extends Date { static now() { return clock.now; } } : Date,
+    Float32Array, Uint8Array, Blob, URL, Response,
     DOMException, AbortController, setTimeout, clearTimeout,
     navigator: { storage: { persist: async () => true } },
     caches: cache || { open: async () => ({ match: async () => null, put: async () => {} }) },
     fetch: fetcher || ((url, options) => { const request = deferred(); requests.push({ ...request, url, options }); return request.promise; }),
-    createVad: () => ({ free() {}, acceptWaveform() {}, isDetected: () => speech, isEmpty: () => false, front: () => ({ samples: new Float32Array(9600) }), pop() {} }),
+    createVad: () => ({ free() {}, acceptWaveform() {}, isDetected: () => speech, isEmpty: () => false, front: () => vadSegment, pop() {} }),
     OfflineRecognizer: class {
       free() {}
-      createStream() { return { acceptWaveform() {}, free() {} }; }
+      createStream() { return { acceptWaveform(rate, audio) { decodedAudio.push(audio.slice()); }, free() {} }; }
       decode() {}
-      getResult() { return { text: 'PRIVATE_TAB_A' }; }
+      getResult() { return { text: hypothesis }; }
     },
   });
   sandbox.window = sandbox;
@@ -147,10 +152,71 @@ function engine({ runtimeReady = true, cache, fetcher, cryptoImpl = webcrypto } 
   } } };
   vm.runInContext(read('asr-engine.js'), sandbox);
   const config = { apiKey: 'sk-fake', packageUrl: 'http://local/mock.data', packageMeta: { files: [], remote_package_size: 0 }, onEvent: e => events.push(e) };
-  return { api: sandbox.JLSEngine, config, events, requests, scripts, ready: () => moduleReady(),
+  return { api: sandbox.JLSEngine, config, events, requests, scripts, decodedAudio, ready: () => moduleReady(),
+    hypothesis(text) { hypothesis = text; },
+    vadSegment(samples, start = 0) { vadSegment = { samples, start }; },
+    speech(seconds) { speech = true; for (let i = 0; i < Math.round(seconds * 10); i++) sandbox.JLSEngine.feed(new Float32Array(1600)); },
+    endSpeech() { speech = false; sandbox.JLSEngine.feed(new Float32Array(1600)); },
     utterance() { speech = true; for (let i = 0; i < 6; i++) sandbox.JLSEngine.feed(new Float32Array(1600)); speech = false; sandbox.JLSEngine.feed(new Float32Array(1600)); },
   };
 }
+
+test('long changing previews stay local and only the final sentence is translated', async () => {
+  const clock = { now: 10000 };
+  const context = engine({ clock });
+  await context.api.init(context.config);
+  try {
+    for (const preview of [
+      'こんにちは、今日は東京の天気について',
+      'こんにちは、今日は東京の天気についてお話しします。',
+      'こんにちは、今日は東京の天気についてお話しします。午後から',
+    ]) {
+      clock.now += 3000;
+      context.hypothesis(preview);
+      context.speech(1.5);
+      await tick();
+      assert.equal(context.requests.length, 0, 'a changing preview must not call DeepSeek');
+    }
+    assert(context.events.filter(e => e.type === 'partial').length >= 3, 'Japanese previews remain visible');
+    const finalText = 'こんにちは、今日は東京の天気についてお話しします。午後から雨が降るそうです。';
+    context.hypothesis(finalText);
+    context.endSpeech();
+    await tick();
+    assert.equal(context.requests.length, 1);
+    const payload = JSON.parse(context.requests[0].options.body);
+    assert.equal(payload.messages.find(m => m.role === 'user').content, finalText);
+    context.requests[0].resolve({ ok: true, json: async () => ({ choices: [{ message: { content: '今天介绍东京的天气，下午可能下雨。' } }] }) });
+    await tick();
+    const translations = context.events.filter(e => e.type === 'translation');
+    assert.equal(translations.length, 1);
+    assert.equal(translations[0].final, true);
+    assert.equal(translations[0].id, context.events.find(e => e.type === 'final').id);
+  } finally { context.api.stop(); }
+});
+
+test('a long utterance only decodes its remaining audio after a forced final', async () => {
+  const context = engine({ clock: { now: 10000 } });
+  await context.api.init(context.config);
+  try {
+    context.speech(12);
+    await tick();
+    assert.equal(context.requests.length, 1);
+    assert.equal(context.decodedAudio.at(-1).length, 12 * 16000);
+    context.requests[0].resolve({ ok: true, json: async () => ({ choices: [{ message: { content: '前半译文' } }] }) });
+    await tick();
+    context.speech(1);
+    const wholeUtterance = new Float32Array(13 * 16000).fill(1);
+    wholeUtterance.fill(2, 12 * 16000);
+    context.vadSegment(wholeUtterance);
+    context.endSpeech();
+    await tick();
+    assert.equal(context.requests.length, 2, 'one request for each non-overlapping final');
+    assert.equal(context.decodedAudio.at(-1).length, 16000);
+    assert(context.decodedAudio.at(-1).every(value => value === 2), 'previously finalized audio must not be decoded again');
+    context.requests[1].resolve({ ok: true, json: async () => ({ choices: [{ message: { content: '剩余译文' } }] }) });
+    await tick();
+  } finally { context.api.stop(); }
+});
 
 test('late API response is aborted and cannot leak into a new session', async () => {
   const context = engine();
