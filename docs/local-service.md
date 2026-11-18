@@ -145,3 +145,13 @@ python -m server.app --asr qwen3-asr --model-dir /path/to/Qwen3-ASR-1.7B --asr-d
 ```
 
 `--asr-fallback sensevoice` 默认在备用后端加载失败时尝试 CPU SenseVoice。识别模型目录可用 `--fallback-model-dir` 指定。设置 `--asr-fallback off` 后可严格测试某个后端。服务报告实际模型和回退来源。常规运行仅加载一套 ASR。模型与制品来源见 [模型对照](model-comparison.md)。
+
+## 录播说话人分离
+
+可在独立虚拟环境中安装 `requirements.txt` 和 `requirements/diarization.txt`。在 Hugging Face 接受 Community-1 条款并取得完整模型目录后，使用本地音频运行。
+
+```sh
+python -m server.diarization recording.wav --model-dir /path/to/community-1 --output speakers.json
+```
+
+在输出中，同一时间区间可以有多个匿名 `SPEAKER_00` 类标签。可通过 `--captions` 输入带 `start`、`end` 的 JSON 字幕数组。任务适用于最多一小时的录播，识别与处理在本地执行。默认扩展和 WebSocket 实时路径无需加载说话人模型。 [Community-1 权重与条款](https://huggingface.co/pyannote/speaker-diarization-community-1)
