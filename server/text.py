@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 
 CJK = r"\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uff00-\uffef"
 _RE_SPACE_BETWEEN_CJK = re.compile(rf"(?<=[{CJK}])[ \t]+(?=[{CJK}])")
@@ -54,6 +55,18 @@ def trim_overlap(previous: str, current: str) -> str:
         if previous[-size:] == current[:size] and current[size:].strip():
             return current[size:].lstrip()
     return current
+
+
+def edit_distance(first: Sequence, second: Sequence) -> int:
+    if len(second) > len(first):
+        first, second = second, first
+    previous = list(range(len(second) + 1))
+    for i, left in enumerate(first, 1):
+        current = [i]
+        for j, right in enumerate(second, 1):
+            current.append(min(current[-1] + 1, previous[j] + 1, previous[j - 1] + (left != right)))
+        previous = current
+    return previous[-1]
 
 
 def clean_translation(text: str) -> str:

@@ -10,12 +10,16 @@ Design constraints
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import time
+import uuid
 from dataclasses import dataclass
 
 import numpy as np
 
 from .asr import Capabilities, Recognition, RecognitionContext, SAMPLE_RATE, SileroVad, Recognizer
+from .asr_agent import Action, OptimizationAgent
+from .asr_review import ReviewStore
 from .asr_router import DecodeScheduler
 from .episodes import DomainSelection
 from .text import normalize_ja, stable_prefix, trim_overlap
@@ -101,12 +105,17 @@ class StreamSession:
         config: SessionConfig | None = None,
         *,
         decoder: DecodeScheduler | None = None,
+        agent: OptimizationAgent | None = None,
+        review: ReviewStore | None = None,
     ):
         self.asr = asr
         self.translator = translator.new_session() if isinstance(translator, TranslationPipeline) else translator
         self.on_event = on_event
         self.cfg = config or SessionConfig()
         self.decoder = decoder or DecodeScheduler()
+        self.agent = agent
+        self.review = review
+        self._review_session = uuid.uuid4().hex if review else ""
         self.capabilities = getattr(asr, "capabilities", Capabilities())
         self.vad = SileroVad(min_silence=self.cfg.vad.min_silence)
         self._max_segment = round(self.cfg.vad.max_segment * SAMPLE_RATE)
@@ -286,6 +295,9 @@ class StreamSession:
         return {**stats, "deliveries_in_flight": len(self._translations),
                 "last_translated_segment": self.last_translated_segment}
 
+    def agent_stats(self) -> dict:
+        return dict(self.agent.counts) if self.agent else {}
+
     async def _translate(self, seg_id: int, text: str, target: str, context: str, epoch: int,
                          deadline: float) -> None:
         try:
@@ -365,9 +377,31 @@ class StreamSession:
         self._last_forced_text = ""
         if len(audio) < SAMPLE_RATE * 0.3:
             return
-        text = (await self._decode(audio)).text
+        primary = await self._decode(audio)
+        text = primary.text
         if not text:
             return
+        agent = self.agent
+        if agent:
+            seg_id, epoch, domain = self._seg_id, self.translation_epoch, self.cfg.domain
+
+            def provisional(hypothesis):
+                self._emit({"type": "partial", "id": seg_id, "text": hypothesis, "stable": "",
+                            "stage": "verification", "t": round(audio_end_ratio, 2)})
+
+            try:
+                decision = await agent.optimize(primary, domain, audio, forced=forced,
+                                                backlog=self._queued_bytes >= PREVIEW_BACKLOG, provisional=provisional)
+                if epoch == self.translation_epoch:
+                    text = decision.text
+                    if self.review and (decision.action != Action.ACCEPT_ORIGINAL or primary.changes):
+                        try:
+                            self.review.record(self._review_session, seg_id, primary, decision,
+                                               (domain.episode or domain.franchise) if domain else "")
+                        except (OSError, sqlite3.Error):
+                            agent.counts["audit_failures"] += 1
+            except Exception:
+                agent.counts["failures"] += 1
         text = trim_overlap(overlap_text, text)
         if forced:
             self._last_forced_text = text
@@ -439,8 +473,12 @@ class StreamSession:
         await self._emit_partial(end)
 
     async def _run(self) -> None:
-        while not self._closed:
-            item = await self._q.get()
-            self._queued_bytes -= item.nbytes
-            self._append(item)
-            await self._feed_vad(item)
+        try:
+            while not self._closed:
+                item = await self._q.get()
+                self._queued_bytes -= item.nbytes
+                self._append(item)
+                await self._feed_vad(item)
+        except Exception:
+            self._emit({"type": "error", "scope": "asr", "fatal": True, "code": "audio_processing_failed",
+                        "message": "音频处理失败，请重新开始字幕"})

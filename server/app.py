@@ -23,6 +23,7 @@ import asyncio
 import json
 import os
 import secrets
+import sqlite3
 import sys
 import time
 from dataclasses import asdict
@@ -34,7 +35,9 @@ from aiohttp import ClientConnectionError, WSMsgType, web
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from server.asr import BackendUnavailable, Capabilities, PROVIDERS, Recognizer  # noqa: E402
+from server.asr import BackendUnavailable, Capabilities, PROVIDERS, Recognizer, create_recognizer  # noqa: E402
+from server.asr_agent import OptimizationAgent  # noqa: E402
+from server.asr_review import ReviewStore  # noqa: E402
 from server.asr_router import DecodeScheduler, select_recognizer  # noqa: E402
 from server.asr_domain import PACKS, PROFILES, normalize_packs  # noqa: E402
 from server.episodes import EpisodeCatalog  # noqa: E402
@@ -54,11 +57,19 @@ class AppState:
         self, asr: Recognizer, translator: TranslationPipeline, *,
         access_token: str | None = None, allowed_hosts: set[str] | None = None, vad: VadSettings = VadSettings(),
         fallback_from: str | None = None, episodes: EpisodeCatalog | None = None,
+        agent_enabled: bool = False, secondary: Recognizer | None = None, agent_budget_ms: int = 450,
+        review: ReviewStore | None = None,
     ):
         self.asr = asr
         self.translator = translator
         self.vad = vad
         self.decoder = DecodeScheduler()
+        self.verifier = DecodeScheduler()
+        self.verification_rate = RateBudget(.2, 1)
+        self.agent_enabled = agent_enabled
+        self.secondary = secondary
+        self.agent_budget_ms = agent_budget_ms
+        self.review = review
         self.fallback_from = fallback_from
         self.episodes = episodes or EpisodeCatalog()
         self.capabilities = asdict(getattr(asr, "capabilities", Capabilities()))
@@ -86,6 +97,12 @@ class AppState:
     @property
     def engine(self) -> str:
         return self.translator.engine
+
+    def new_agent(self) -> OptimizationAgent | None:
+        if self.agent_enabled:
+            return OptimizationAgent(self.verifier, self.secondary, budget_ms=self.agent_budget_ms,
+                                     rate=self.verification_rate)
+        return None
 
 
 STATE_KEY = web.AppKey("state", AppState)
@@ -134,8 +151,15 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
             return ws
 
         cfg = SessionConfig(vad=state.vad)
+
+        def emit(event):
+            out.put(event)
+            if event.get("fatal"):
+                out.fail(1011, b"Audio processing failed")
+
         try:
-            session = StreamSession(state.asr, state.translator, out.put, cfg, decoder=state.decoder)
+            session = StreamSession(state.asr, state.translator, emit, cfg, decoder=state.decoder,
+                                    agent=state.new_agent(), review=state.review)
         except (OSError, RuntimeError):
             await ws.close(code=1011, message=b"VAD unavailable; verify local model")
             return ws
@@ -154,7 +178,8 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 await ws.close(code=code, message=reason, drain=False)
 
         await ws.send_json({"type": "ready", "asr": state.asr.name, "translator": state.engine, "source": "ja", "target": "zh",
-                            "asr_capabilities": state.capabilities, "asr_fallback_from": state.fallback_from})
+                            "asr_capabilities": state.capabilities, "asr_fallback_from": state.fallback_from,
+                            "agent": {"enabled": state.agent_enabled, "secondary": state.secondary.name if state.secondary else None}})
         writer_task = asyncio.create_task(writer())
         audio_budget = RateBudget(128000, 256000)  # Up to 2x realtime, four-second burst.
         control_budget = RateBudget(20, 40)
@@ -189,6 +214,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                         out.put({"type": "pong", "t": time.time()})
                     elif kind == "stats":
                         out.put({"type": "stats", **session.stats.as_dict(), "translation": session.translation_stats(),
+                                 "agent": session.agent_stats(),
                                  "queue": out.stats(), "audio_queue_bytes": session.queued_audio_bytes})
                 elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
                     break
@@ -320,6 +346,13 @@ def main() -> int:
     lexicon.add_argument("--asr-domain", choices=PROFILES, help="Legacy ASR lexicon profile")
     ap.add_argument("--asr-terms", default=cfg.get("asr_terms"), help="Custom ASR lexicon JSON, replaces built-in terms")
     ap.add_argument("--episode-catalog", default=cfg.get("episode_catalog"), help="Local episode metadata JSON")
+    ap.add_argument("--agent", action=argparse.BooleanOptionalAction, default=cfg.get("agent", False))
+    ap.add_argument("--agent-secondary", choices=PROVIDERS, default=cfg.get("agent_secondary"))
+    ap.add_argument("--agent-model-dir", default=cfg.get("agent_model_dir"))
+    ap.add_argument("--agent-device", choices=("cpu", "cuda"), default=cfg.get("agent_device", "cpu"))
+    ap.add_argument("--agent-precision", default=cfg.get("agent_precision"))
+    ap.add_argument("--agent-budget-ms", type=int, default=cfg.get("agent_budget_ms", 450))
+    ap.add_argument("--agent-audit", default=cfg.get("agent_audit"), help="Opt in to a local SQLite review file")
     ap.add_argument("--dev-assets", action="store_true", help="Expose non-secret development test pages")
     ap.add_argument("--allow-host", action="append", default=[], help="Additional trusted HTTP hostname (no scheme or port)")
     args = ap.parse_args()
@@ -331,6 +364,8 @@ def main() -> int:
 
     api_key = os.environ.get("DEEPSEEK_API_KEY") or cfg.get("deepseek_api_key")
     try:
+        if not 100 <= args.agent_budget_ms <= 1500:
+            raise ValueError("Agent budget must be between 100 and 1500 ms")
         vad = VadSettings(args.vad_min_silence, args.vad_max_segment, args.vad_overlap)
         episodes = EpisodeCatalog(args.episode_catalog)
         asr, fallback_from = select_recognizer(args.asr, model_dir=args.model_dir, language="ja",
@@ -339,10 +374,26 @@ def main() -> int:
                                                fallback_dir=args.fallback_model_dir, allow_fallback=args.asr_fallback != "off")
     except (OSError, ValueError, BackendUnavailable) as exc:
         ap.error(str(exc))
+    secondary = review = None
+    if args.agent and args.agent_secondary:
+        if args.agent_device == asr.capabilities.device == "cuda":
+            ap.error("Choose at most one CUDA ASR model per service")
+        try:
+            secondary = create_recognizer(args.agent_secondary, model_dir=args.agent_model_dir,
+                                          num_threads=min(args.threads, 2), asr_domain="off",
+                                          device=args.agent_device, precision=args.agent_precision)
+        except (OSError, ValueError, BackendUnavailable):
+            print(f"[jls] 无法加载复查模型 {args.agent_secondary}，保留主模型识别")
+    if args.agent and args.agent_audit:
+        try:
+            review = ReviewStore(args.agent_audit)
+        except (OSError, sqlite3.Error):
+            print("[jls] 无法打开本地审核文件，字幕服务继续运行")
     translator = TranslationPipeline(create_translator(args.translator, api_key))
     state = AppState(asr, translator, access_token=os.environ.get("JLSUBS_ACCESS_TOKEN") or cfg.get("access_token"),
                      allowed_hosts=LOCAL_HOSTS | set(args.allow_host), vad=vad, fallback_from=fallback_from,
-                     episodes=episodes)
+                     episodes=episodes, agent_enabled=args.agent, secondary=secondary,
+                     agent_budget_ms=args.agent_budget_ms, review=review)
     active_packs = ("custom" if selection != "off" else "off") if args.asr_terms else ",".join(normalize_packs(selection)) or "off"
     print(f"[jls] asr={asr.name} threads={args.threads} asr_packs={active_packs} translator={translator.engine}")
     if fallback_from:
