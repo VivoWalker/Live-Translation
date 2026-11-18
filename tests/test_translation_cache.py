@@ -198,33 +198,36 @@ class TranslationCacheTests(unittest.IsolatedAsyncioTestCase):
             second = StreamSession(None, self.pipe, lambda event: None)
         self.addAsyncCleanup(first.close); self.addAsyncCleanup(second.close)
         await first.translator.translate('句X', 'zh', '文脈')
-        first._final_context = '文脈'
-        first._schedule_translation(0, '句X', True); await first._translate_task
-        self.assertEqual(first._final_context, '句X')
+        first.previous_final_japanese = '文脈'
+        await first._schedule_translation(0, '句X')
+        self.assertEqual(first.previous_final_japanese, '句X')
         self.assertEqual(len(self.requests), 1)
-        first._schedule_translation(1, '句Y', True); await first._translate_task
+        await first._schedule_translation(1, '句Y')
         self.assertEqual(json.loads(self.requests[-1]['payload']['messages'][1]['content'])['previous'], '句X')
         await second.translator.translate('句X', 'zh', '文脈')
         self.assertEqual(len(self.requests), 3)
         self.assertEqual(len([event for event in events if event['type'] == 'translation']), 2)
         await first.set_target('en')
-        self.assertEqual(first._final_context, '')
+        self.assertEqual(first.previous_final_japanese, '')
         self.assertEqual(first.translation_stats()['cache_entries'], 0)
         self.assertEqual(second.translation_stats()['api_requests'], 1)
 
-    async def test_superseded_identical_segment_reuses_transport_but_delivers_only_new_id(self):
+    async def test_identical_text_and_context_share_transport_and_deliver_each_segment(self):
         self.release.clear()
         events = []
         with patch('server.streaming.SileroVad'):
             session = StreamSession(None, self.pipe, events.append)
         self.addAsyncCleanup(session.close)
-        session._schedule_translation(0, '同じ句', True)
+        session.previous_final_japanese = '同じ句'
+        first = session._schedule_translation(0, '同じ句')
         await self.entered.wait()
-        session._schedule_translation(1, '同じ句', True)
-        session._schedule_translation(1, '同じ句', True)
-        await asyncio.sleep(.01); self.release.set(); await session._translate_task
+        second = session._schedule_translation(1, '同じ句')
+        self.assertIsNone(session._schedule_translation(1, '同じ句'))
+        await asyncio.sleep(.01)
+        self.release.set()
+        await asyncio.gather(first, second)
         self.assertEqual(len(self.requests), 1)
-        self.assertEqual([event['id'] for event in events if event['type'] == 'translation'], [1])
+        self.assertEqual([event['id'] for event in events if event['type'] == 'translation'], [0, 1])
         self.assertEqual(session.translation_stats()['merged_requests'], 1)
 
     async def test_target_change_clears_context_before_cancellation_can_yield_to_audio_worker(self):
@@ -246,14 +249,15 @@ class TranslationCacheTests(unittest.IsolatedAsyncioTestCase):
             session = StreamSession(None, SimpleNamespace(name='mock', translate=translate), events.append)
         self.addAsyncCleanup(session.close)
         self.addCleanup(release.set)
-        session._final_context = 'old context'
-        session._schedule_translation(0, 'old', True)
+        session.previous_final_japanese = 'old context'
+        old = session._schedule_translation(0, 'old')
         await entered.wait()
         changing = asyncio.create_task(session.set_target('en'))
         await cancelling.wait()
-        session._schedule_translation(1, 'new', True)
+        new = session._schedule_translation(1, 'new')
         release.set()
         await changing
-        await session._translate_task
+        await asyncio.gather(old, new)
         self.assertEqual(requests[-1], ('new', 'en', ''))
         self.assertEqual([event['id'] for event in events if event['type'] == 'translation'], [1])
+        self.assertIn({'type': 'translation_cancelled', 'id': 0}, events)

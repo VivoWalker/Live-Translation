@@ -58,13 +58,15 @@
 
   const PROMPT_VERSION = 'subtitle-v2';
   const CACHE_LIMIT = 500, CACHE_BYTES = 1024 * 1024, ENTRY_BYTES = 32768, MAX_INFLIGHT = 32;
+  const MAX_DELIVERIES = 32, TRANSLATION_CONCURRENCY = 3, MAX_QUEUE_MS = 16000;
   const USAGE_FIELDS = ['prompt_cache_hit_tokens', 'prompt_cache_miss_tokens', 'completion_tokens'];
   const encoder = new TextEncoder();
   let translationModel = 'deepseek-chat', translationBase = 'https://api.deepseek.com';
   let promptVersion = PROMPT_VERSION, temperature = 0.2, maxTokens = 512;
   let translationEpoch = 0;
   function freshTranslationState() {
-    return { cache: new Map(), bytes: 0, inflight: new Map(), deliveries: new Map(), delivered: new Map(), contextId: -1,
+    return { cache: new Map(), bytes: 0, inflight: new Map(), deliveries: new Map(), queue: [], active: 0,
+      timer: null, lastSubmittedId: -1, lastTranslatedSegment: -1, succeeded: 0, failures: 0, overflows: 0, timeouts: 0,
       api: 0, completed: 0, hits: 0, merged: 0, ms: 0,
       tokens: Object.fromEntries(USAGE_FIELDS.map(k => [k, 0])),
       reported: Object.fromEntries(USAGE_FIELDS.map(k => [k, 0])),
@@ -97,7 +99,9 @@
       usage_reported_tokens: known, usage_unavailable_requests: { ...s.missing },
       usage_pending_requests: Math.max(0, s.api - s.completed),
       cache_entries: s.cache.size, cache_bytes: s.bytes, in_flight: s.inflight.size,
-      deliveries_in_flight: s.deliveries.size, delivered_segments: s.delivered.size };
+      deliveries_in_flight: s.deliveries.size, delivered_segments: Math.min(s.succeeded, CACHE_LIMIT),
+      last_translated_segment: s.lastTranslatedSegment < 0 ? null : s.lastTranslatedSegment,
+      translation_failures: s.failures, translation_overflows: s.overflows, translation_timeouts: s.timeouts };
   }
   function finishRequest(s, ms, usage) {
     add(s, 'completed'); add(s, 'ms', Math.max(0, ms));
@@ -117,19 +121,19 @@
       s.bytes -= s.cache.get(oldest).bytes; s.cache.delete(oldest);
     }
   }
-  function resetTranslationState() {
+  function resetTranslationState(notify = false) {
     ++translationEpoch;
     for (const controller of pendingRequests) controller.abort();
     pendingRequests.clear();
-    for (const timer of timers) clearTimeout(timer);
-    timers.clear();
+    clearTimeout(translationState.timer);
+    const pendingIds = [...translationState.deliveries.keys()];
     translationState.cache.clear(); translationState.inflight.clear();
-    translationState.deliveries.clear(); translationState.delivered.clear();
+    translationState.deliveries.clear(); translationState.queue.length = 0;
     translationState = freshTranslationState();
-    finalContext = '';
+    previousFinalJapanese = '';
+    if (notify) for (const id of pendingIds) emit({ type: 'translation_cancelled', id });
   }
-  function requestSnapshot(text) {
-    const context = finalContext;
+  function requestSnapshot(text, context) {
     const target = targetLang;
     const payload = { model: translationModel,
       messages: [ { role: 'system', content: PROMPTS[target] || PROMPTS.zh },
@@ -150,30 +154,56 @@
     });
   }
   async function performRequest(snapshot, state, epoch, record) {
-    let started, usage;
     const controller = record.controller;
-    let timeout;
     try {
       if (!validTranslation(epoch, state) || controller.signal.aborted) throw new DOMException('cancelled', 'AbortError');
-      started = performance.now(); add(state, 'api');
-      timeout = setTimeout(() => controller.abort(), 12000);
-      const response = await abortable(fetch(snapshot.endpoint, { method: 'POST', signal: controller.signal,
-        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + snapshot.apiKey },
-        body: JSON.stringify(snapshot.payload) }), controller.signal);
-      if (!response.ok) throw new Error('HTTP ' + response.status);
-      const data = await abortable(response.json(), controller.signal); usage = data?.usage;
+      const started = performance.now();
+      const timeout = setTimeout(() => controller.abort(), 12000);
+      try {
+        let text, retryTimer;
+        try {
+          text = await requestOnce(snapshot, state, controller.signal);
+        } catch (error) {
+          if (!error.retryable) throw error;
+          try {
+            await abortable(new Promise(resolve => { retryTimer = setTimeout(resolve, 250); }), controller.signal);
+          } finally { clearTimeout(retryTimer); }
+          text = await requestOnce(snapshot, state, controller.signal);
+        }
+        if (!validTranslation(epoch, state) || controller.signal.aborted) throw new DOMException('cancelled', 'AbortError');
+        cachePut(state, snapshot.key, text);
+        return { text, ms: Math.round(performance.now() - started), source: 'api' };
+      } finally { clearTimeout(timeout); }
+    } finally {
+      pendingRequests.delete(controller);
+      if (state.inflight.get(snapshot.key) === record) state.inflight.delete(snapshot.key);
+    }
+  }
+  async function requestOnce(snapshot, state, signal) {
+    signal.throwIfAborted();
+    const started = performance.now();
+    let usage;
+    add(state, 'api');
+    try {
+      let response;
+      try {
+        response = await abortable(fetch(snapshot.endpoint, { method: 'POST', signal,
+          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + snapshot.apiKey },
+          body: JSON.stringify(snapshot.payload) }), signal);
+      } catch (error) {
+        if (error.name === 'TypeError') throw Object.assign(new Error('请求失败'), { retryable: true });
+        throw error;
+      }
+      if (!response.ok) throw Object.assign(new Error('HTTP ' + response.status),
+        { retryable: response.status === 429 || response.status >= 500 });
+      const data = await abortable(response.json(), signal);
+      usage = data?.usage;
       const choice = Array.isArray(data?.choices) ? data.choices[0] : null, content = choice?.message?.content;
       if (choice?.finish_reason !== 'stop' || typeof content !== 'string' || !content.trim()) throw new Error('翻译结果为空或不完整');
       const text = content.trim().replace(/^(译文|翻译|中文)[:：]\s*/, '').trim().replace(/^["“”]+|["“”]+$/g, '').trim().replace(/\s*\n+\s*/g, ' ');
       if (!text) throw new Error('翻译结果为空');
-      if (!validTranslation(epoch, state) || controller.signal.aborted) throw new DOMException('cancelled', 'AbortError');
-      cachePut(state, snapshot.key, text);
-      return { text, ms: Math.round(performance.now() - started), source: 'api' };
-    } finally {
-      if (started !== undefined) finishRequest(state, performance.now() - started, usage);
-      clearTimeout(timeout); pendingRequests.delete(controller);
-      if (state.inflight.get(snapshot.key) === record) state.inflight.delete(snapshot.key);
-    }
+      return text;
+    } finally { finishRequest(state, performance.now() - started, usage); }
   }
   async function requestTranslation(snapshot, state, epoch) {
     if (encoder.encode(snapshot.key).length > 65536) throw new Error('翻译文本过长');
@@ -208,7 +238,7 @@
       domainCorrector = selectDomain(packs);
       asrPacks = packs;
     }
-    resetTranslationState();
+    resetTranslationState(true);
     targetLang = next.target; apiKey = next.apiKey; translationModel = next.model; translationBase = next.baseUrl;
     promptVersion = next.promptVersion; temperature = next.temperature; maxTokens = next.maxTokens;
   }
@@ -225,16 +255,6 @@
   let modelLoad = null;
   const scripts = new Map();
   const pendingRequests = new Set();
-  const timers = new Set();
-
-  function scheduleTranslation(id, text, final) {
-    const epoch = generation;
-    const timer = setTimeout(() => {
-      timers.delete(timer);
-      if (epoch === generation) translate(id, text, final, epoch);
-    }, 0);
-    timers.add(timer);
-  }
 
   const chunks = [];
   let totalSamples = 0;
@@ -247,7 +267,7 @@
   let partialInterval = PARTIAL_INTERVAL;
   let lastHyp = '';
   let lastText = '';
-  let finalContext = '';
+  let previousFinalJapanese = '';
   let busy = false;
   let decodeMsTotal = 0;
   let decodeCount = 0;
@@ -408,32 +428,62 @@
   }
 
   // ------------------------------------------------------------ translation
-  function translate(id, text, isFinal, epoch) {
-    if (epoch !== generation || !isFinal || !text) return Promise.resolve();
+  function scheduleTranslation(id, text) {
     const state = translationState, ticket = translationEpoch;
-    if (state.delivered.has(id)) return Promise.resolve();
-    if (state.deliveries.has(id)) return state.deliveries.get(id);
-    if (state.deliveries.size >= 64) return Promise.resolve();
-    const snapshot = requestSnapshot(text);
-    const delivery = Promise.resolve().then(async () => {
-      try {
-        if (!snapshot.apiKey) throw new Error('未填写 DeepSeek API Key');
-        const result = await requestTranslation(snapshot, state, ticket);
-        if (epoch !== generation || !validTranslation(ticket, state) || state.delivered.has(id)) return;
-        state.delivered.set(id, true);
-        while (state.delivered.size > 500) state.delivered.delete(state.delivered.keys().next().value);
-        translateCount++; translateMsTotal += result.ms;
-        if (id >= state.contextId) { finalContext = snapshot.text; state.contextId = id; }
-        emit({ type: 'translation', id, final: true, text: result.text, source: result.source,
-          engine: result.source === 'cache' ? 'deepseek:cache' : 'deepseek', ms: result.ms });
-      } catch (error) {
-        const safe = ['未填写 DeepSeek API Key', '翻译结果为空或不完整', '翻译结果为空', '翻译文本过长', '翻译请求过多，请稍后重试'].includes(error.message) || /^HTTP \d+$/.test(error.message) ? error.message : '请求失败';
-        if (epoch === generation && validTranslation(ticket, state)) emit({ type: 'error', scope: 'translate', id,
-          message: error.name === 'AbortError' ? '翻译请求已取消或超时' : '翻译失败：' + safe });
-      } finally { if (state.deliveries.get(id) === delivery) state.deliveries.delete(id); }
-    });
-    state.deliveries.set(id, delivery);
-    return delivery;
+    if (id <= state.lastSubmittedId) return;
+    state.lastSubmittedId = id;
+    const context = previousFinalJapanese;
+    previousFinalJapanese = text;
+    if (state.deliveries.size >= MAX_DELIVERIES) {
+      add(state, 'overflows'); add(state, 'failures');
+      emit({ type: 'error', scope: 'translate', id, code: 'translation_overflow', message: '翻译队列已满' });
+      return;
+    }
+    state.deliveries.set(id, { snapshot: requestSnapshot(text, context), queuedAt: performance.now() });
+    state.queue.push(id);
+    if (state.timer === null && state.active < TRANSLATION_CONCURRENCY) {
+      state.timer = setTimeout(() => {
+        state.timer = null;
+        pumpTranslations(state, ticket);
+      }, 0);
+    }
+  }
+
+  function pumpTranslations(state, ticket) {
+    if (!validTranslation(ticket, state)) return;
+    while (state.active < TRANSLATION_CONCURRENCY && state.queue.length) {
+      const id = state.queue.shift();
+      state.active++;
+      deliverTranslation(id, state, ticket).finally(() => {
+        state.deliveries.delete(id);
+        state.active--;
+        pumpTranslations(state, ticket);
+      });
+    }
+  }
+
+  async function deliverTranslation(id, state, ticket) {
+    const { snapshot, queuedAt } = state.deliveries.get(id);
+    try {
+      if (performance.now() - queuedAt >= MAX_QUEUE_MS) throw new DOMException('queue timeout', 'AbortError');
+      if (!snapshot.apiKey) throw new Error('未填写 DeepSeek API Key');
+      const result = await requestTranslation(snapshot, state, ticket);
+      if (!validTranslation(ticket, state)) return;
+      add(state, 'succeeded');
+      state.lastTranslatedSegment = Math.max(state.lastTranslatedSegment, id);
+      translateCount++; translateMsTotal += performance.now() - queuedAt;
+      emit({ type: 'translation', id, final: true, text: result.text, source: result.source,
+        engine: result.source === 'cache' ? 'deepseek:cache' : 'deepseek', ms: result.ms });
+    } catch (error) {
+      if (!validTranslation(ticket, state)) return;
+      add(state, 'failures');
+      const timedOut = error.name === 'AbortError';
+      if (timedOut) add(state, 'timeouts');
+      const safe = ['未填写 DeepSeek API Key', '翻译结果为空或不完整', '翻译结果为空', '翻译文本过长'].includes(error.message)
+        || /^HTTP \d+$/.test(error.message) ? error.message : '请求失败';
+      emit({ type: 'error', scope: 'translate', id, code: timedOut ? 'translation_timeout' : 'translation_failed',
+        message: timedOut ? '翻译请求超时' : '翻译失败：' + safe });
+    }
   }
 
   // ------------------------------------------------------------ audio pipeline
@@ -519,7 +569,7 @@
         decode_ms: Math.round(lastDecodeMs),
       });
       lastText = text;
-      scheduleTranslation(id, text, true);
+      scheduleTranslation(id, text);
     } finally {
       busy = false;
       resetSegment();
@@ -714,7 +764,7 @@
     started = ready = false;
     resetTranslationState();
     onEvent = () => {};
-    apiKey = finalContext = lastHyp = lastText = '';
+    apiKey = lastHyp = lastText = '';
     chunks.length = 0;
     vadPending = new Float32Array(0);
     totalSamples = segStart = segId = lastPartialAt = finalizedUntil = 0;

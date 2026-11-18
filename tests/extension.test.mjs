@@ -626,14 +626,16 @@ test('browser reuse respects context and a cache hit advances context for the ne
 test('browser concurrent identical requests share one API result and emit once per distinct segment', async () => {
   const context = engine(); await context.api.init(context.config);
   try {
-    context.hypothesis('同じ句'); context.utterance(); context.utterance();
-    await tick(); assert.equal(context.requests.length, 1);
+    context.hypothesis('同じ句'); context.utterance(); context.utterance(); context.utterance();
+    await tick(); assert.equal(context.requests.length, 2);
+    context.requests[1].resolve(successfulReply()); await tick();
     context.requests[0].resolve(successfulReply()); await tick();
     const events = context.events.filter(e => e.type === 'translation');
-    assert.equal(events.length, 2); assert.equal(new Set(events.map(e => e.id)).size, 2);
+    assert.deepEqual(events.slice(0, 2).map(e => e.id).sort(), [1, 2]);
+    assert.equal(events[2].id, 0);
     const stats = context.api.stats().translation;
-    assert.equal(stats.api_requests, 1); assert.equal(stats.merged_requests, 1);
-    assert.equal(stats.completion_tokens, 5); assert.equal(stats.in_flight, 0);
+    assert.equal(stats.api_requests, 2); assert.equal(stats.merged_requests, 1);
+    assert.equal(stats.completion_tokens, 10); assert.equal(stats.in_flight, 0);
     assert.equal(stats.deliveries_in_flight, 0);
   } finally { context.api.stop(); }
 });
@@ -660,7 +662,7 @@ test('browser incomplete and failed responses are not cached and can be retried'
   const context = engine(); await context.api.init(context.config);
   try {
     for (const response of [
-      { ok: false, status: 500 },
+      { ok: false, status: 400 },
       { ok: true, json: async () => ({ choices: [{ finish_reason: 'length', message: { content: '截断的输出' } }] }) },
       { ok: true, json: async () => ({ choices: [{ message: { content: '缺失结束标记' } }] }) },
       successfulReply('  '), successfulReply('“”'),
@@ -673,6 +675,38 @@ test('browser incomplete and failed responses are not cached and can be retried'
     await translatedUtterance(context, '同じ句');
     assert.equal(context.requests.length, 6);
     assert.equal(context.events.filter(e => e.type === 'translation').length, 1);
+  } finally { context.api.stop(); }
+});
+
+test('browser freezes context before asynchronous completion and bounds the queue', async () => {
+  const context = engine(); await context.api.init(context.config);
+  try {
+    for (let i = 0; i < 35; i++) { context.hypothesis('台詞' + i); context.utterance(); }
+    await tick();
+    const user = request => JSON.parse(JSON.parse(request.options.body).messages[1].content);
+    assert.deepEqual(context.requests.map(user), [
+      { previous: '', current: '台詞0' }, { previous: '台詞0', current: '台詞1' },
+      { previous: '台詞1', current: '台詞2' },
+    ]);
+    assert.equal(context.api.stats().translation.deliveries_in_flight, 32);
+    assert.deepEqual(context.events.filter(e => e.code === 'translation_overflow').map(e => e.id), [32, 33, 34]);
+    assert.equal(context.events.filter(e => e.type === 'final').length, 35);
+    context.requests[1].resolve(successfulReply()); await tick();
+    assert.deepEqual(user(context.requests[3]), { previous: '台詞2', current: '台詞3' });
+    assert.equal(context.events.find(e => e.type === 'translation').id, 1);
+  } finally { context.api.stop(); }
+});
+
+test('browser retries a transient provider error once for the same segment', async () => {
+  let attempts = 0;
+  const context = engine({ fetcher: async () => ++attempts === 1 ? { ok: false, status: 503 } : successfulReply() });
+  await context.api.init(context.config);
+  try {
+    context.utterance();
+    await new Promise(resolve => setTimeout(resolve, 310));
+    assert.equal(attempts, 2);
+    assert.deepEqual(context.events.filter(e => e.type === 'translation').map(e => e.id), [0]);
+    assert.equal(context.api.stats().translation.api_requests, 2);
   } finally { context.api.stop(); }
 });
 

@@ -131,7 +131,8 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
         async def writer():
             while True:
                 epoch, event = await out.get()
-                if epoch == session.translation_epoch:
+                is_translation = event["type"] == "translation" or event.get("scope") == "translate"
+                if not is_translation or epoch == session.translation_epoch:
                     await ws.send_json(event)
         writer_task = asyncio.create_task(writer())
         await ws.send_json({"type": "ready", "asr": state.asr.name, "translator": state.engine, "source": "ja", "target": "zh"})
