@@ -76,3 +76,14 @@ python tools/test_translate.py --engine deepseek --probe-cache --report /tmp/dee
 本次未观察到 DeepSeek 服务端缓存收益。原实现已有固定前缀，移动上下文本身不保证命中；这组小样本也不能代表长期命中率或大样本翻译质量。
 
 本地 LRU 与并发合并减少的是实际 API 调用，收益取决于同一上下文中的重复请求频率。服务端缓存收益需以真实 API 返回的 usage 为依据，不承诺未经验证的节省比例。
+
+## 多轮提示对照
+
+下面的命令使用两组合成日语对话，对同一句分别提交单轮和多轮提示。每个目标语言调用四次 DeepSeek，请求结果按稳定的场景编号记录。提供代理的环境可设置 `DEEPSEEK_TRUST_ENV=1`。
+
+```sh
+python tools/test_translate.py --probe-context --target zh --report /tmp/jls-context-zh.json
+python tools/test_translate.py --probe-context --target en --report /tmp/jls-context-en.json
+```
+
+通过环境 HTTPS 代理实测，中英文各四次请求均完成。中文单轮与多轮 P50 分别为 766 和 764 ms，英文分别为 965 和 854 ms，每个分组有两条样本。质量评估需使用额外的参考译文。

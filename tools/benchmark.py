@@ -262,7 +262,7 @@ def main():
     except (ImportError, OSError, RuntimeError, ValueError) as error:
         parser.error(str(error))
     return int(any(model.get("failed") for model in report.get("models", ()))
-               or args.mode == "stream" and report["complete_sessions"] != report["clips"])
+               or args.mode == "stream" and report["complete_sessions"] != len(report["clips"]))
 
 
 if __name__ == "__main__":
