@@ -71,18 +71,19 @@
       missing: Object.fromEntries(USAGE_FIELDS.map(k => [k, 0])) };
   }
   let translationState = freshTranslationState();
-  let asrDomain = 'gakumas', domainData = null, domainCorrector = null, domainPromise = null;
+  let asrPacks = null, selectDomain = null, domainCorrector = null, domainPromise = null;
   async function loadDomain() {
     if (!domainPromise) domainPromise = (async () => {
       await loadScript(baseUrl() + 'asr-domain.js');
-      const response = await fetch(baseUrl() + 'asr-terms.json');
-      if (!response.ok) throw new Error('识别词表加载失败');
-      const raw = await response.text();
-      if (encoder.encode(raw).length > 256 * 1024) throw new Error('识别词表过大');
-      domainData = JSON.parse(raw);
-      // Validate even when disabled; subsequent mode changes stay synchronous.
-      window.JLSASRDomain.create(domainData, 'off');
-    })().catch(() => { domainPromise = null; domainData = null; throw new Error('识别词表加载失败，请重新加载扩展'); });
+      const sources = await Promise.all(window.JLSASRDomain.packs.map(async id => {
+        const response = await fetch(baseUrl() + `asr-terms/${id}.json`);
+        if (!response.ok) throw new Error('识别词表加载失败');
+        const raw = await response.text();
+        if (encoder.encode(raw).length > 256 * 1024) throw new Error('识别词表过大');
+        return [id, JSON.parse(raw)];
+      }));
+      selectDomain = window.JLSASRDomain.loadPacks(Object.fromEntries(sources));
+    })().catch(() => { domainPromise = null; throw new Error('识别词表加载失败，请重新加载扩展'); });
     await domainPromise;
   }
   const add = (object, key, amount = 1) => object[key] = Math.min(Number.MAX_SAFE_INTEGER, object[key] + amount);
@@ -192,21 +193,24 @@
   }
   function setConfig(config) {
     const string = (key, fallback) => typeof config[key] === 'string' ? config[key] : fallback;
+    const selection = config.asrPacks ?? config.asrDomain;
+    const packs = selection === undefined ? asrPacks : window.JLSASRDomain.normalizePacks(selection);
+    const packsChanged = packs?.join() !== asrPacks?.join();
     const next = { target: string('target', targetLang), apiKey: string('apiKey', apiKey),
-      asrDomain: string('asrDomain', asrDomain),
       model: string('model', translationModel), baseUrl: string('baseUrl', translationBase),
       promptVersion: string('promptVersion', promptVersion),
       temperature: Number.isFinite(config.temperature) ? config.temperature : temperature,
       maxTokens: Number.isSafeInteger(config.maxTokens) && config.maxTokens > 0 ? config.maxTokens : maxTokens };
-    if (!['off', 'anime', 'gakumas'].includes(next.asrDomain)) throw new Error('未知的识别词表');
-    const changed = next.asrDomain !== asrDomain || next.target !== targetLang || next.apiKey !== apiKey || next.model !== translationModel ||
+    const changed = packsChanged || next.target !== targetLang || next.apiKey !== apiKey || next.model !== translationModel ||
       next.baseUrl !== translationBase || next.promptVersion !== promptVersion || next.temperature !== temperature || next.maxTokens !== maxTokens;
     if (!changed) return;
+    if (packsChanged) {
+      domainCorrector = selectDomain(packs);
+      asrPacks = packs;
+    }
     resetTranslationState();
     targetLang = next.target; apiKey = next.apiKey; translationModel = next.model; translationBase = next.baseUrl;
     promptVersion = next.promptVersion; temperature = next.temperature; maxTokens = next.maxTokens;
-    asrDomain = next.asrDomain;
-    if (domainData) domainCorrector = window.JLSASRDomain.create(domainData, asrDomain);
   }
 
   let recognizer = null;
@@ -617,10 +621,6 @@
   async function init(config) {
     stop();
     const epoch = generation;
-    setConfig({ target: config.target || 'zh', apiKey: config.apiKey || '', model: config.model || 'deepseek-chat',
-      asrDomain: config.asrDomain || 'gakumas',
-      baseUrl: config.baseUrl || 'https://api.deepseek.com', promptVersion: config.promptVersion || PROMPT_VERSION,
-      temperature: config.temperature ?? 0.2, maxTokens: config.maxTokens ?? 512 });
     onEvent = config.onEvent || (() => {});
     const controller = modelLoad = new AbortController();
     const { signal } = controller;
@@ -628,9 +628,12 @@
       if (epoch === generation) emit({ type: 'progress', message });
     };
     try {
-      await loadDomain();
+      await abortable(loadDomain(), signal);
       signal.throwIfAborted();
-      domainCorrector = window.JLSASRDomain.create(domainData, asrDomain);
+      setConfig({ target: config.target || 'zh', apiKey: config.apiKey || '', model: config.model || 'deepseek-chat',
+        asrPacks: config.asrPacks ?? config.asrDomain ?? 'gakumas',
+        baseUrl: config.baseUrl || 'https://api.deepseek.com', promptVersion: config.promptVersion || PROMPT_VERSION,
+        temperature: config.temperature ?? 0.2, maxTokens: config.maxTokens ?? 512 });
       const files = await loadModels(config, progress, signal);
       signal.throwIfAborted();
       const module = await abortable(loadRuntime(progress), signal);
@@ -697,7 +700,7 @@
       avg_decode_ms: decodeCount ? Math.round(decodeMsTotal / decodeCount) : 0,
       rtf: decodeCount ? +(decodeMsTotal / 1000 / Math.max(totalSamples / SAMPLE_RATE, 0.01)).toFixed(3) : 0,
       finals,
-      asr_domain: asrDomain,
+      asr_packs: asrPacks?.slice() ?? [],
       translations: translateCount,
       translation: translationStats(),
       avg_translate_ms: translateCount ? Math.round(translateMsTotal / translateCount) : 0,

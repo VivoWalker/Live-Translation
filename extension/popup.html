@@ -42,18 +42,20 @@
             <option value="en">English</option>
           </select>
         </label>
-        <label class="field wide" id="asr-domain-field">
-          <span>专名词表</span>
-          <select id="asr-domain">
-            <option value="gakumas">学マス · 陽高真白 · 动漫声优</option>
-            <option value="anime">动漫声优 · BanG Dream! · Love Live!</option>
-            <option value="off">关闭</option>
-          </select>
-        </label>
         <label class="field wide" id="apikey-field">
           <span>DeepSeek API Key</span>
           <input id="apikey" type="password" placeholder="sk-…" autocomplete="off">
         </label>
+        <fieldset class="lexicon-field wide" id="asr-domain-field">
+          <legend>专名词库</legend>
+          <div class="lexicon-options">
+            <label><input type="checkbox" id="asr-pack-mashiro">陽高真白</label>
+            <label><input type="checkbox" id="asr-pack-gakumas">学マス</label>
+            <label><input type="checkbox" id="asr-pack-bandori">BanG Dream!</label>
+            <label><input type="checkbox" id="asr-pack-lovelive">Love Live!</label>
+            <label><input type="checkbox" id="asr-pack-general">通用声优与动画</label>
+          </div>
+        </fieldset>
         <label class="field wide" id="server-field" hidden>
           <span>服务地址</span>
           <input id="server" type="text" spellcheck="false" autocomplete="off">
@@ -78,6 +80,7 @@
     <button id="stop" type="button" class="button stop" hidden><span class="stop-icon" aria-hidden="true"></span>停止字幕</button>
   </footer>
   <script src="caption-settings.js"></script>
+  <script src="asr-domain.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

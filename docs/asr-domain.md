@@ -1,28 +1,32 @@
 # 日语领域识别与词表
 
-浏览器默认使用日语 `language=ja` 的 SenseVoice；Python 的 SenseVoice / Whisper 保持 `language=ja`、Whisper `task=transcribe`。三种路径在规范化日语后，使用同一份 [asr-terms.json](../extension/asr-terms.json) 做本地专名纠错，再发送日语字幕和最终分段翻译。partial 不调用翻译服务。
+浏览器的 SenseVoice 与 Python 的 SenseVoice、Whisper 共用[日语专名词库](../extension/asr-terms)。识别文本规范化后先在本地校正专名，再显示日语字幕或翻译最终分段。
 
 当前 sherpa-onnx 的这两种离线模型接入使用 `greedy_search`。已检查安装版本的 `from_sense_voice` / `from_whisper` 及 WASM 绑定；这里没有为它们配置 transducer 的 hotwords 参数，也没有伪造 Whisper initial prompt 支持。本次实现是可关闭的文本领域适配，没有重新训练模型权重，不能修复没听到的音节、重叠语音或被背景音乐盖住的内容。
 
 ## 使用
 
-扩展弹窗的「专名纠错」提供三个选项，开始下一次字幕时生效：
+在扩展弹窗的「专名词库」中勾选需要的词库，下次开始字幕时生效。默认全部勾选，全部取消可关闭纠错。
 
-| 选项 | 行为 |
+| 词库 | 本地服务 ID |
 | --- | --- |
-| 学マス / 陽高真白 + 动漫声优（默认） | 全部词条，包括学マス角色、歌曲及通用动漫声优 |
-| 动漫声优 / BanG Dream! / Love Live! | `common` 词条；不应用学マス角色及歌曲规则 |
-| 关闭 | 不替换识别结果；仍进行日语空格规范化 |
+| 陽高真白 | `mashiro` |
+| 学マス | `gakumas` |
+| BanG Dream! | `bandori` |
+| Love Live! | `lovelive` |
+| 通用声优与动画 | `general` |
 
 本地服务的配置由服务进程设置，扩展的选项不会覆盖共享服务：
 
 ```sh
-python -m server.app --asr-domain gakumas
-python -m server.app --asr whisper --asr-domain anime
-python -m server.app --asr-domain off
+python -m server.app --asr-packs mashiro gakumas
+python -m server.app --asr whisper --asr-packs bandori lovelive
+python -m server.app --asr-packs
 ```
 
-也可在 `config.local.json` 中设置 `"asr_domain": "gakumas"`。Python 指定非日语或 `auto` 语言时不应用日语词表。没有新增模型下载、在线纠错或额外翻译请求。
+也可在 `config.local.json` 中设置 `"asr_packs": ["mashiro", "gakumas"]`，用 `[]` 关闭。旧版弹窗选项与 `asr_domain` 仍可读取。旧 `gakumas` 对应全部词库，`anime` 对应陽高真白、BanG Dream!、Love Live! 和通用声优与动画，`off` 对应全部关闭。学マス的其他出演者现归入学マス词库。
+
+词条随应用打包，运行时在本地匹配。Python 的日语词库在 `language=ja` 时生效。
 
 ## 范围与误改控制
 
@@ -36,7 +40,7 @@ python -m server.app --asr-domain off
 
 ## 添加实测词条
 
-直接编辑扩展中的 `extension/asr-terms.json`，然后重新加载扩展。Python 同样读取该文件；也可把文件复制成自定义版本，使用 `--asr-terms /path/to/terms.json` 或配置 `"asr_terms": "/path/to/terms.json"`。自定义文件替换整个内置词表，结构如下：
+编辑 `extension/asr-terms/` 中对应的 JSON 文件，再重新加载扩展或重启 Python 服务。Python 也可使用 `--asr-terms /path/to/terms.json` 或 `"asr_terms": "/path/to/terms.json"` 替换整套内置词库。使用自定义文件时请省略 `--asr-packs`。
 
 ```json
 {
@@ -49,7 +53,7 @@ python -m server.app --asr-domain off
 }
 ```
 
-`scope` 只能为 `common` / `gakumas`。`requires` 的任意一个语境组匹配即可，省略表示无语境限制；它们都是字面字符串，不会当作正则表达式执行。以实际识别结果添加最窄的别名，不把某个短姓、普通词或整个读音相近的句子批量映射成专名。先确认标准写法，再添加正例与「不应修改」的反例。
+`scope` 是旧版自定义词库的选填字段，取值为 `common` 或 `gakumas`。`requires` 中的语境组满足任意一个即可，省略表示无语境限制。所有别名和提示词按字面匹配。以实际识别结果添加明确的别名，核对标准写法并补上正例和反例。
 
 词表最多 500 条，每条最多 12 个别名，每个名称/别名 2–80 个 Unicode 字符；上下文组最多 16 组，每组最多 40 个提示词。文件最多 256 KiB，超过 8192 个字符的识别结果跳过纠错。重复别名、缺失上下文组和格式错误会拒绝加载；没有逐句缓存、会话历史或台词日志增长。
 

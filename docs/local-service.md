@@ -101,7 +101,7 @@ python -m server.app --threads 2
 | 识别器 | `asr` / `--asr` / `JLSUBS_ASR` | `sensevoice` |
 | 线程 | `asr_threads` / `--threads` / `JLSUBS_ASR_THREADS` | 配置示例为 2；无配置为 4 |
 | 识别模型路径 | `model_dir` / `--model-dir` | 按所选引擎查找 `models/` |
-| 专名纠错 | `asr_domain` / `--asr-domain` | `gakumas`；可选 `anime` / `off` |
+| 专名词库 | `asr_packs` / `--asr-packs` | 默认启用全部，[词库 ID 和旧配置说明](asr-domain.md#使用) |
 | 自定义词表 | `asr_terms` / `--asr-terms` | 内置词表 |
 | 翻译器 | `translator` / `--translator` / `JLSUBS_TRANSLATOR` | 配置示例为 `deepseek`；无配置为 `auto` |
 | DeepSeek Key | `deepseek_api_key` / `DEEPSEEK_API_KEY` | 用户提供 |

@@ -1,6 +1,6 @@
 /* Capture ownership and routing are tied to an immutable session id. */
 'use strict';
-importScripts('caption-settings.js');
+importScripts('caption-settings.js', 'asr-domain.js');
 const OFFSCREEN_PATH = 'offscreen.html';
 const DEFAULT_SERVER = 'ws://127.0.0.1:8765/ws';
 const state = { tabId: null, running: false, sessionId: null };
@@ -27,7 +27,8 @@ async function ensureContentScript(tabId) {
   try { if ((await chrome.tabs.sendMessage(tabId, { type: 'jls:ping' }))?.ok) return; } catch {}
   await chrome.scripting.executeScript({ target: { tabId }, files: ['caption-settings.js', 'caption-overlay.js', 'content.js'] });
 }
-async function start(tabId, target, serverUrl, streamId, engine = 'browser', apiKey = '', serverToken = '', asrDomain = 'gakumas') {
+async function start({ tabId, target, serverUrl, streamId, engine = 'browser', apiKey = '', serverToken = '', asrPacks, asrDomain }) {
+  const packs = JLSASRDomain.normalizePacks(asrPacks ?? asrDomain);
   await restored;
   const ticket = ++generation;
   const sessionId = crypto.randomUUID();
@@ -48,7 +49,7 @@ async function start(tabId, target, serverUrl, streamId, engine = 'browser', api
     const response = await chrome.runtime.sendMessage({
       type: 'jls:offscreen-start', sessionId, streamId, tabId, target,
       serverUrl: serverUrl || DEFAULT_SERVER, engine, apiKey, serverToken,
-      asrDomain: ['off', 'anime', 'gakumas'].includes(asrDomain) ? asrDomain : 'gakumas',
+      asrPacks: packs,
     });
     if (!current()) return { ok: false, error: '采集已取消' };
     if (!response?.ok) throw new Error(response?.error || '采集启动失败');
@@ -103,7 +104,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!trustedPage(sender, 'popup.html')) return false;
     (async () => {
       await restored;
-      if (msg.type === 'jls:start') return start(msg.tabId, msg.target, msg.serverUrl, msg.streamId, msg.engine, msg.apiKey, msg.serverToken, msg.asrDomain);
+      if (msg.type === 'jls:start') return start(msg);
       if (msg.type === 'jls:stop') { await stop(); return { ok: true }; }
       return { running: state.running, tabId: state.tabId };
     })().then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
