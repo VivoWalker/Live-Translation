@@ -9,8 +9,8 @@ import numpy as np
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from server.asr import SAMPLE_RATE, SileroVad
-from server.streaming import StreamSession
+from server.asr import SAMPLE_RATE, SileroVad, SpeechSpan
+from server.streaming import SessionConfig, StreamSession, VadSettings
 from server.translate import DeepSeekTranslator, Translation, TranslationPipeline
 
 
@@ -47,14 +47,13 @@ class TranslationTimingTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     asr.transcribe.return_value = preview
                     await session._emit_partial()
-                    if session._translate_task:
-                        await asyncio.wait_for(session._translate_task, timeout=2)
+                    self.assertFalse(session._translations)
                     self.assertEqual(requests, [], 'Preview text must stay local')
                 self.assertEqual(len([e for e in events if e['type'] == 'partial']), 3)
                 final_text = 'こんにちは、今日は東京の天気についてお話しします。午後から雨が降るそうです。'
                 asr.transcribe.return_value = final_text
                 await session._finalize(audio, 3.0)
-                await asyncio.wait_for(session._translate_task, timeout=2)
+                await asyncio.wait_for(session._translations[0], timeout=2)
                 self.assertEqual(len(requests), 1)
                 user_text = [json.loads(m['content'])['current'] for m in requests[0]['messages'] if m['role'] == 'user']
                 self.assertEqual(user_text, [final_text])
@@ -70,7 +69,7 @@ class TranslationTimingTests(unittest.IsolatedAsyncioTestCase):
         detector = MagicMock()
         detector.is_speech_detected.return_value = True
         detector.front = SimpleNamespace(start=0, samples=np.concatenate([first, tail]))
-        detector.empty.side_effect = [False, True]
+        detector.empty.return_value = True
         vad = SileroVad.__new__(SileroVad)
         vad._vad = detector
         asr = SimpleNamespace(transcribe=MagicMock(return_value='本段字幕'))
@@ -82,12 +81,13 @@ class TranslationTimingTests(unittest.IsolatedAsyncioTestCase):
         session._speech = True
         session._append(first)
         await session._step()
-        await session._translate_task
+        await session._translations[0]
         self.assertEqual(len(asr.transcribe.call_args.args[0]), 12 * SAMPLE_RATE)
         session._append(tail)
         detector.is_speech_detected.return_value = False
+        detector.empty.side_effect = [False, True]
         await session._step()
-        await session._translate_task
+        await session._translations[1]
         self.assertEqual(asr.transcribe.call_count, 2)
         np.testing.assert_array_equal(asr.transcribe.call_args.args[0], tail)
         self.assertEqual(translator.translate.await_count, 2)
@@ -101,24 +101,81 @@ class TranslationTimingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(vad.pop_segments(since=32000), [])
         detector.pop.assert_called_once()
 
-    async def test_replaced_translation_notifies_the_waiting_caption(self):
-        entered = asyncio.Event()
+    async def test_multiple_vad_segments_and_configured_overlap(self):
+        first = np.zeros(8 * SAMPLE_RATE, dtype=np.float32)
+        tail = np.zeros(SAMPLE_RATE, dtype=np.float32)
+        asr = SimpleNamespace(transcribe=MagicMock(side_effect=["この台詞は次の続き", "次の続きです", "別の句"]))
+        translator = SimpleNamespace(translate=AsyncMock(return_value=Translation("译文", "mock", 0)))
+        events = []
+        with patch("server.streaming.SileroVad") as factory:
+            session = StreamSession(asr, translator, events.append, SessionConfig(vad=VadSettings(.6, 8, .2)))
+        self.addAsyncCleanup(session.close)
+        factory.assert_called_once_with(min_silence=.6)
+        session._speech = session.vad.in_speech = True
+        session.vad.pop_spans.return_value = []
+        session._append(first)
+        await session._step()
+        session.vad.in_speech = False
+        overlap = int(.2 * SAMPLE_RATE)
+        session.vad.pop_spans.return_value = [
+            SpeechSpan(len(first) - overlap, np.zeros(len(tail) + overlap, dtype=np.float32)),
+            SpeechSpan(len(first) + len(tail), tail),
+        ]
+        session._append(np.concatenate([tail, tail]))
+        await session._step()
+        self.assertEqual([event["text"] for event in events if event["type"] == "final"],
+                         ["この台詞は次の続き", "です", "別の句"])
+        self.assertEqual([event["t"] for event in events if event["type"] == "final"], [8, 9, 10])
+        session.vad.pop_spans.assert_called_with(since=len(first) - overlap)
+
+    async def test_slow_first_translation_still_arrives_and_context_follows_finals(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        requests = []
+
         async def translate(text, target, context):
+            requests.append((text, target, context))
             if text == '前の句':
                 entered.set()
-                await asyncio.Event().wait()
+                await release.wait()
             return Translation(text='新句译文', engine='test', ms=0)
         translator = SimpleNamespace(translate=translate)
         events = []
         with patch('server.streaming.SileroVad'):
             session = StreamSession(None, translator, events.append)
         self.addAsyncCleanup(session.close)
-        session._schedule_translation(0, '前の句', final=True)
+        previous = session._schedule_translation(0, '前の句')
         await asyncio.wait_for(entered.wait(), 2)
-        previous = session._translate_task
-        session._schedule_translation(1, '新しい句', final=True)
-        await asyncio.wait_for(session._translate_task, 2)
-        await asyncio.gather(previous, return_exceptions=True)
-        self.assertTrue(previous.cancelled())
-        self.assertIn({'type': 'translation_cancelled', 'id': 0}, events)
-        self.assertEqual([event['id'] for event in events if event['type'] == 'translation'], [1])
+        await asyncio.wait_for(session._schedule_translation(1, '新しい句'), 2)
+        release.set()
+        await asyncio.wait_for(previous, 2)
+        await session._schedule_translation(2, '最後の句')
+        self.assertEqual(requests, [('前の句', 'zh', ''), ('新しい句', 'zh', '前の句'), ('最後の句', 'zh', '新しい句')])
+        self.assertEqual([event['id'] for event in events], [1, 0, 2])
+
+    async def test_concurrency_limit_overflow_and_timeout_have_segment_status(self):
+        active = peak = 0
+
+        async def wait_for_timeout(*args, **kwargs):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            try:
+                await asyncio.Event().wait()
+            finally:
+                active -= 1
+
+        translator = AsyncMock(side_effect=wait_for_timeout)
+        events = []
+        with (patch('server.streaming.SileroVad'),
+              patch('server.streaming.TRANSLATION_CONCURRENCY', 1),
+              patch('server.streaming.MAX_TRANSLATIONS', 2),
+              patch('server.streaming.TRANSLATION_DEADLINE', .03)):
+            session = StreamSession(None, SimpleNamespace(translate=translator), events.append)
+            self.addAsyncCleanup(session.close)
+            tasks = [session._schedule_translation(i, str(i)) for i in range(3)]
+            await asyncio.gather(*tasks[:2])
+        self.assertEqual(peak, 1)
+        self.assertEqual(session.previous_final_japanese, '2')
+        self.assertEqual({event['id']: event['code'] for event in events},
+                         {0: 'translation_timeout', 1: 'translation_timeout', 2: 'translation_overflow'})
+        self.assertEqual(session.stats.translation_failures, 3)

@@ -19,6 +19,7 @@ const getArg = (name, def) => {
 };
 const PAGE_URL = getArg('url', 'http://127.0.0.1:8765/?autostart=file');
 const SECONDS = Number(getArg('seconds', '16'));
+const SWITCH_LANGUAGE = argv.includes('--switch-language');
 const PORT = Number(getArg('port', '9337'));
 const CHROME = process.env.JLS_CHROME || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 
@@ -122,6 +123,7 @@ try {
   await sleep(1500);
 
   const seen = [];
+  let translated = false;
   const t0 = Date.now();
   let lastLine = '';
   while (Date.now() - t0 < SECONDS * 1000) {
@@ -134,6 +136,7 @@ try {
     if (!raw) continue;
     const { cap, st } = JSON.parse(raw);
     if (cap && cap.ja) {
+      translated ||= Boolean(cap.zh);
       const line = `${cap.ja} || ${cap.zh} || ${cap.meta}`;
       if (line !== lastLine) {
         lastLine = line;
@@ -146,6 +149,19 @@ try {
 
   const finalState = await evaluate(ws, sessionId, 'JSON.stringify(window.__jls ? window.__jls.state : {})');
   console.log('\nstate:', finalState);
+  let switched = !SWITCH_LANGUAGE;
+  if (SWITCH_LANGUAGE) {
+    await evaluate(ws, sessionId, `(() => {
+      const target = document.querySelector('#target');
+      target.value = 'en';
+      target.dispatchEvent(new Event('change'));
+    })()`);
+    for (let attempt = 0; attempt < 35 && !switched; attempt++) {
+      await sleep(400);
+      switched = await evaluate(ws, sessionId, "window.__jls.captionText.zh?.startsWith('[en] ') || false");
+    }
+    console.log('mock language switch:', switched);
+  }
 
   const shot = getArg('shot', '');
   if (shot) {
@@ -165,9 +181,11 @@ try {
     console.log('console:');
     for (const l of logs.slice(-20)) console.log('  ' + l);
   }
-  console.log(`\ncaption updates observed: ${seen.length}`);
-  console.log(seen.length >= 2 ? 'RESULT: PASS' : 'RESULT: FAIL');
-  if (seen.length < 2) process.exitCode = 1;
+  const stopped = await evaluate(ws, sessionId, 'window.__jls.stop(); !window.__jls.state.capturing');
+  console.log(`\ncaption updates observed: ${seen.length}, translated: ${translated}, stopped: ${stopped}`);
+  const pass = seen.length >= 2 && translated && switched && stopped;
+  console.log(pass ? 'RESULT: PASS' : 'RESULT: FAIL');
+  if (!pass) process.exitCode = 1;
   ws.close();
 } catch (e) {
   console.error('RESULT: FAIL', e.message);

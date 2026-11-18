@@ -18,6 +18,17 @@
   const MAX_WINDOW_SEC = 7;
   const MAX_SEGMENT_SEC = 12;
   const KEEP_SEC = 20;
+  const DEFAULT_VAD = Object.freeze({ minSilence: 0.4, maxSegment: MAX_SEGMENT_SEC, overlap: 0 });
+
+  function vadSettings(options = {}) {
+    const settings = { ...DEFAULT_VAD, ...options };
+    for (const [key, min, max] of [['minSilence', .2, 1.2], ['maxSegment', 8, 16], ['overlap', 0, .3]]) {
+      if (!Number.isFinite(settings[key]) || settings[key] < min || settings[key] > max) {
+        throw new RangeError('无效的语音分段设置');
+      }
+    }
+    return settings;
+  }
 
   const MODEL_FILES = [
     {
@@ -57,14 +68,25 @@
   };
 
   const PROMPT_VERSION = 'subtitle-v2';
+  const CONTEXT_PROMPTS = {
+    zh: 'history、episode、franchise 和 glossary 只用于理解当前台词。按 glossary 统一当前句中的专名。保留口头自改、吐槽、笑意和自然的主语省略，避免书面化和补写未说出的内容。只输出 current 的译文。',
+    en: 'Use history, episode, franchise and glossary only to understand current. Apply glossary to names in the current line. Keep conversational repairs, joking tone and natural omissions. Avoid invented details. Translate current only.',
+  };
+  const TURN_LIMIT = 512;
+  const MAX_PROVIDER_BYTES = 64 * 1024, MAX_TRANSLATION_CHARS = 8192;
+  const CONTEXT_WINDOWS = [1, 3, 4, 5];
   const CACHE_LIMIT = 500, CACHE_BYTES = 1024 * 1024, ENTRY_BYTES = 32768, MAX_INFLIGHT = 32;
+  const MAX_DELIVERIES = 32, TRANSLATION_CONCURRENCY = 3, MAX_QUEUE_MS = 16000;
   const USAGE_FIELDS = ['prompt_cache_hit_tokens', 'prompt_cache_miss_tokens', 'completion_tokens'];
   const encoder = new TextEncoder();
   let translationModel = 'deepseek-chat', translationBase = 'https://api.deepseek.com';
   let promptVersion = PROMPT_VERSION, temperature = 0.2, maxTokens = 512;
   let translationEpoch = 0;
+  let contextTurns = 1, translationGlossary = null, glossaryPromise = null;
+  const conversation = [];
   function freshTranslationState() {
-    return { cache: new Map(), bytes: 0, inflight: new Map(), deliveries: new Map(), delivered: new Map(), contextId: -1,
+    return { cache: new Map(), bytes: 0, inflight: new Map(), deliveries: new Map(), queue: [], active: 0,
+      timer: null, lastSubmittedId: -1, lastTranslatedSegment: -1, succeeded: 0, failures: 0, overflows: 0, timeouts: 0,
       api: 0, completed: 0, hits: 0, merged: 0, ms: 0,
       tokens: Object.fromEntries(USAGE_FIELDS.map(k => [k, 0])),
       reported: Object.fromEntries(USAGE_FIELDS.map(k => [k, 0])),
@@ -72,19 +94,54 @@
   }
   let translationState = freshTranslationState();
   let asrPacks = null, selectDomain = null, domainCorrector = null, domainPromise = null;
+  let episodePromise = null, activeEpisode = null, domainMode = 'manual';
+  async function loadJson(name, maxBytes = 256 * 1024) {
+    const response = await fetch(baseUrl() + `asr-terms/${name}.json`);
+    if (!response.ok) throw new Error('识别词表加载失败');
+    const raw = await response.text();
+    if (encoder.encode(raw).length > maxBytes) throw new Error('识别词表过大');
+    return JSON.parse(raw);
+  }
   async function loadDomain() {
     if (!domainPromise) domainPromise = (async () => {
       await loadScript(baseUrl() + 'asr-domain.js');
-      const sources = await Promise.all(window.JLSASRDomain.packs.map(async id => {
-        const response = await fetch(baseUrl() + `asr-terms/${id}.json`);
-        if (!response.ok) throw new Error('识别词表加载失败');
-        const raw = await response.text();
-        if (encoder.encode(raw).length > 256 * 1024) throw new Error('识别词表过大');
-        return [id, JSON.parse(raw)];
-      }));
+      const sources = await Promise.all(window.JLSASRDomain.packs.map(async id => [id, await loadJson(id)]));
       selectDomain = window.JLSASRDomain.loadPacks(Object.fromEntries(sources));
     })().catch(() => { domainPromise = null; throw new Error('识别词表加载失败，请重新加载扩展'); });
     await domainPromise;
+  }
+  async function findEpisode(title, signal) {
+    try {
+      if (!episodePromise) episodePromise = loadJson('episodes').then(window.JLSASRDomain.loadEpisodes)
+        .catch(error => { episodePromise = null; throw error; });
+      return (await abortable(episodePromise, signal))(title);
+    } catch (error) {
+      signal.throwIfAborted();
+      emit({ type: 'error', scope: 'domain', message: '节目词表加载失败，已关闭自动纠错' });
+      return null;
+    }
+  }
+  async function loadGlossary(signal) {
+    if (!glossaryPromise) glossaryPromise = loadJson('translation', 32 * 1024).then(data => {
+      const valid = value => typeof value === 'string' && value.length >= 1 && value.length <= 80 &&
+        value.trim() === value && !/[\u0000-\u001f\u007f]/.test(value);
+      if (!valid(data.version)) throw new Error('无效译名词表');
+      for (const target of ['zh', 'en']) {
+        const table = data[target];
+        if (!table || typeof table !== 'object' || Array.isArray(table)) throw new Error('无效译名词表');
+        const entries = Object.entries(table);
+        if (entries.length > 256 || !entries.every(pair => pair.every(valid))) throw new Error('无效译名词表');
+        data[target] = entries.sort(([a], [b]) => b.length - a.length || (a > b ? 1 : -1));
+      }
+      return data;
+    }).catch(error => { glossaryPromise = null; throw error; });
+    try {
+      return await abortable(glossaryPromise, signal);
+    } catch (error) {
+      signal.throwIfAborted();
+      emit({ type: 'error', scope: 'translate_config', message: '译名词表加载失败，已保留一级对话上下文' });
+      return null;
+    }
   }
   const add = (object, key, amount = 1) => object[key] = Math.min(Number.MAX_SAFE_INTEGER, object[key] + amount);
   function translationStats() {
@@ -97,7 +154,9 @@
       usage_reported_tokens: known, usage_unavailable_requests: { ...s.missing },
       usage_pending_requests: Math.max(0, s.api - s.completed),
       cache_entries: s.cache.size, cache_bytes: s.bytes, in_flight: s.inflight.size,
-      deliveries_in_flight: s.deliveries.size, delivered_segments: s.delivered.size };
+      deliveries_in_flight: s.deliveries.size, delivered_segments: Math.min(s.succeeded, CACHE_LIMIT),
+      last_translated_segment: s.lastTranslatedSegment < 0 ? null : s.lastTranslatedSegment,
+      translation_failures: s.failures, translation_overflows: s.overflows, translation_timeouts: s.timeouts };
   }
   function finishRequest(s, ms, usage) {
     add(s, 'completed'); add(s, 'ms', Math.max(0, ms));
@@ -117,27 +176,40 @@
       s.bytes -= s.cache.get(oldest).bytes; s.cache.delete(oldest);
     }
   }
-  function resetTranslationState() {
+  function resetTranslationState(notify = false) {
     ++translationEpoch;
     for (const controller of pendingRequests) controller.abort();
     pendingRequests.clear();
-    for (const timer of timers) clearTimeout(timer);
-    timers.clear();
+    clearTimeout(translationState.timer);
+    const pendingIds = [...translationState.deliveries.keys()];
     translationState.cache.clear(); translationState.inflight.clear();
-    translationState.deliveries.clear(); translationState.delivered.clear();
+    translationState.deliveries.clear(); translationState.queue.length = 0;
     translationState = freshTranslationState();
-    finalContext = '';
+    conversation.length = 0;
+    if (notify) for (const id of pendingIds) emit({ type: 'translation_cancelled', id });
   }
-  function requestSnapshot(text) {
-    const context = finalContext;
+  function requestSnapshot(text, history) {
     const target = targetLang;
+    const user = { previous: history.at(-1) || '', current: text };
+    const extended = contextTurns > 1 && translationGlossary;
+    let system = PROMPTS[target] || PROMPTS.zh;
+    if (extended) {
+      user.history = history;
+      if (activeEpisode?.episode) user.episode = activeEpisode.episode;
+      if (activeEpisode?.franchise) user.franchise = activeEpisode.franchise;
+      const texts = [text, ...history, user.episode || '', user.franchise || ''];
+      const entries = (translationGlossary[target] || translationGlossary.zh)
+        .filter(([canonical]) => texts.some(value => value.includes(canonical))).slice(0, 8);
+      if (entries.length) user.glossary = Object.fromEntries(entries);
+      system += '\n' + (CONTEXT_PROMPTS[target] || CONTEXT_PROMPTS.zh);
+    }
     const payload = { model: translationModel,
-      messages: [ { role: 'system', content: PROMPTS[target] || PROMPTS.zh },
-        { role: 'user', content: JSON.stringify({ previous: context, current: text }) } ],
+      messages: [ { role: 'system', content: system }, { role: 'user', content: JSON.stringify(user) } ],
       temperature, max_tokens: maxTokens, stream: false };
     const endpoint = translationBase.replace(/\/+$/, '') + '/chat/completions';
-    return { endpoint, payload, text, target, context, apiKey,
-      key: JSON.stringify([endpoint, promptVersion, target, payload]) };
+    const version = extended ? promptVersion + '+context-v1' : promptVersion;
+    return { endpoint, payload, apiKey,
+      key: JSON.stringify([endpoint, version, extended ? translationGlossary.version : '', target, payload]) };
   }
   function validTranslation(epoch, state) { return epoch === translationEpoch && state === translationState; }
   function abortable(promise, signal) {
@@ -150,29 +222,74 @@
     });
   }
   async function performRequest(snapshot, state, epoch, record) {
-    let started, usage;
     const controller = record.controller;
-    let timeout;
     try {
       if (!validTranslation(epoch, state) || controller.signal.aborted) throw new DOMException('cancelled', 'AbortError');
-      started = performance.now(); add(state, 'api');
-      timeout = setTimeout(() => controller.abort(), 12000);
-      const response = await abortable(fetch(snapshot.endpoint, { method: 'POST', signal: controller.signal,
-        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + snapshot.apiKey },
-        body: JSON.stringify(snapshot.payload) }), controller.signal);
-      if (!response.ok) throw new Error('HTTP ' + response.status);
-      const data = await abortable(response.json(), controller.signal); usage = data?.usage;
+      const started = performance.now();
+      const timeout = setTimeout(() => controller.abort(), 12000);
+      try {
+        let text, retryTimer;
+        try {
+          text = await requestOnce(snapshot, state, controller.signal);
+        } catch (error) {
+          if (!error.retryable) throw error;
+          try {
+            await abortable(new Promise(resolve => { retryTimer = setTimeout(resolve, 250); }), controller.signal);
+          } finally { clearTimeout(retryTimer); }
+          text = await requestOnce(snapshot, state, controller.signal);
+        }
+        if (!validTranslation(epoch, state) || controller.signal.aborted) throw new DOMException('cancelled', 'AbortError');
+        cachePut(state, snapshot.key, text);
+        return { text, ms: Math.round(performance.now() - started), source: 'api' };
+      } finally { clearTimeout(timeout); }
+    } finally {
+      pendingRequests.delete(controller);
+      if (state.inflight.get(snapshot.key) === record) state.inflight.delete(snapshot.key);
+    }
+  }
+  async function requestOnce(snapshot, state, signal) {
+    signal.throwIfAborted();
+    const started = performance.now();
+    let usage;
+    add(state, 'api');
+    try {
+      let response;
+      try {
+        response = await abortable(fetch(snapshot.endpoint, { method: 'POST', signal,
+          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + snapshot.apiKey },
+          body: JSON.stringify(snapshot.payload) }), signal);
+      } catch (error) {
+        if (error.name === 'TypeError') throw Object.assign(new Error('请求失败'), { retryable: true });
+        throw error;
+      }
+      if (!response.ok) throw Object.assign(new Error('HTTP ' + response.status),
+        { retryable: response.status === 429 || response.status >= 500 });
+      const data = await providerJson(response, signal);
+      usage = data?.usage;
       const choice = Array.isArray(data?.choices) ? data.choices[0] : null, content = choice?.message?.content;
       if (choice?.finish_reason !== 'stop' || typeof content !== 'string' || !content.trim()) throw new Error('翻译结果为空或不完整');
       const text = content.trim().replace(/^(译文|翻译|中文)[:：]\s*/, '').trim().replace(/^["“”]+|["“”]+$/g, '').trim().replace(/\s*\n+\s*/g, ' ');
-      if (!text) throw new Error('翻译结果为空');
-      if (!validTranslation(epoch, state) || controller.signal.aborted) throw new DOMException('cancelled', 'AbortError');
-      cachePut(state, snapshot.key, text);
-      return { text, ms: Math.round(performance.now() - started), source: 'api' };
+      if (!text || text.length > MAX_TRANSLATION_CHARS) throw new Error('翻译结果为空或过长');
+      return text;
+    } finally { finishRequest(state, performance.now() - started, usage); }
+  }
+  async function providerJson(response, signal) {
+    const reader = response.body?.getReader?.();
+    if (!reader) return abortable(response.json(), signal);
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+    let size = 0, text = '', complete = false;
+    try {
+      while (true) {
+        const { done, value } = await abortable(reader.read(), signal);
+        if (done) { complete = true; break; }
+        size += value.byteLength;
+        if (size > MAX_PROVIDER_BYTES) throw new Error('翻译响应过长');
+        text += decoder.decode(value, { stream: true });
+      }
+      return JSON.parse(text + decoder.decode());
     } finally {
-      if (started !== undefined) finishRequest(state, performance.now() - started, usage);
-      clearTimeout(timeout); pendingRequests.delete(controller);
-      if (state.inflight.get(snapshot.key) === record) state.inflight.delete(snapshot.key);
+      if (!complete) reader.cancel().catch(() => {});
+      reader.releaseLock();
     }
   }
   async function requestTranslation(snapshot, state, epoch) {
@@ -195,20 +312,29 @@
     const string = (key, fallback) => typeof config[key] === 'string' ? config[key] : fallback;
     const selection = config.asrPacks ?? config.asrDomain;
     const packs = selection === undefined ? asrPacks : window.JLSASRDomain.normalizePacks(selection);
-    const packsChanged = packs?.join() !== asrPacks?.join();
+    const episode = Object.hasOwn(config, 'episode') ? config.episode : selection === undefined ? activeEpisode : null;
+    const mode = config.domainMode || domainMode;
+    const turns = CONTEXT_WINDOWS.includes(config.contextTurns) ? config.contextTurns : contextTurns;
+    const glossary = Object.hasOwn(config, 'glossary') ? config.glossary : translationGlossary;
+    const packsChanged = packs?.join() !== asrPacks?.join() || episode !== activeEpisode;
     const next = { target: string('target', targetLang), apiKey: string('apiKey', apiKey),
       model: string('model', translationModel), baseUrl: string('baseUrl', translationBase),
       promptVersion: string('promptVersion', promptVersion),
       temperature: Number.isFinite(config.temperature) ? config.temperature : temperature,
       maxTokens: Number.isSafeInteger(config.maxTokens) && config.maxTokens > 0 ? config.maxTokens : maxTokens };
-    const changed = packsChanged || next.target !== targetLang || next.apiKey !== apiKey || next.model !== translationModel ||
+    const changed = packsChanged || mode !== domainMode || turns !== contextTurns || glossary !== translationGlossary ||
+      next.target !== targetLang || next.apiKey !== apiKey || next.model !== translationModel ||
       next.baseUrl !== translationBase || next.promptVersion !== promptVersion || next.temperature !== temperature || next.maxTokens !== maxTokens;
     if (!changed) return;
     if (packsChanged) {
-      domainCorrector = selectDomain(packs);
+      domainCorrector = selectDomain(packs, episode);
       asrPacks = packs;
+      activeEpisode = episode;
     }
-    resetTranslationState();
+    domainMode = mode;
+    contextTurns = turns;
+    translationGlossary = glossary;
+    resetTranslationState(true);
     targetLang = next.target; apiKey = next.apiKey; translationModel = next.model; translationBase = next.baseUrl;
     promptVersion = next.promptVersion; temperature = next.temperature; maxTokens = next.maxTokens;
   }
@@ -225,16 +351,6 @@
   let modelLoad = null;
   const scripts = new Map();
   const pendingRequests = new Set();
-  const timers = new Set();
-
-  function scheduleTranslation(id, text, final) {
-    const epoch = generation;
-    const timer = setTimeout(() => {
-      timers.delete(timer);
-      if (epoch === generation) translate(id, text, final, epoch);
-    }, 0);
-    timers.add(timer);
-  }
 
   const chunks = [];
   let totalSamples = 0;
@@ -242,12 +358,13 @@
   let segStart = 0;
   let segId = 0;
   let finalizedUntil = 0;
+  let lastForcedText = '';
+  let vadConfig = DEFAULT_VAD;
   let speaking = false;
   let lastPartialAt = 0;
   let partialInterval = PARTIAL_INTERVAL;
   let lastHyp = '';
   let lastText = '';
-  let finalContext = '';
   let busy = false;
   let decodeMsTotal = 0;
   let decodeCount = 0;
@@ -255,6 +372,7 @@
   let translateCount = 0;
   let translateMsTotal = 0;
   let lastDecodeMs = 0;
+  let previewBacklogSkips = 0;
 
   function emit(ev) {
     try {
@@ -407,33 +525,73 @@
     return a.slice(0, i);
   }
 
+  function trimOverlap(previous, text) {
+    const before = Array.from(previous), after = Array.from(text);
+    for (let size = Math.min(8, before.length, after.length - 1); size >= 3; size--) {
+      const tail = after.slice(size).join('').trimStart();
+      if (tail && before.slice(-size).join('') === after.slice(0, size).join('')) return tail;
+    }
+    return text;
+  }
+
   // ------------------------------------------------------------ translation
-  function translate(id, text, isFinal, epoch) {
-    if (epoch !== generation || !isFinal || !text) return Promise.resolve();
+  function scheduleTranslation(id, text) {
     const state = translationState, ticket = translationEpoch;
-    if (state.delivered.has(id)) return Promise.resolve();
-    if (state.deliveries.has(id)) return state.deliveries.get(id);
-    if (state.deliveries.size >= 64) return Promise.resolve();
-    const snapshot = requestSnapshot(text);
-    const delivery = Promise.resolve().then(async () => {
-      try {
-        if (!snapshot.apiKey) throw new Error('未填写 DeepSeek API Key');
-        const result = await requestTranslation(snapshot, state, ticket);
-        if (epoch !== generation || !validTranslation(ticket, state) || state.delivered.has(id)) return;
-        state.delivered.set(id, true);
-        while (state.delivered.size > 500) state.delivered.delete(state.delivered.keys().next().value);
-        translateCount++; translateMsTotal += result.ms;
-        if (id >= state.contextId) { finalContext = snapshot.text; state.contextId = id; }
-        emit({ type: 'translation', id, final: true, text: result.text, source: result.source,
-          engine: result.source === 'cache' ? 'deepseek:cache' : 'deepseek', ms: result.ms });
-      } catch (error) {
-        const safe = ['未填写 DeepSeek API Key', '翻译结果为空或不完整', '翻译结果为空', '翻译文本过长', '翻译请求过多，请稍后重试'].includes(error.message) || /^HTTP \d+$/.test(error.message) ? error.message : '请求失败';
-        if (epoch === generation && validTranslation(ticket, state)) emit({ type: 'error', scope: 'translate', id,
-          message: error.name === 'AbortError' ? '翻译请求已取消或超时' : '翻译失败：' + safe });
-      } finally { if (state.deliveries.get(id) === delivery) state.deliveries.delete(id); }
-    });
-    state.deliveries.set(id, delivery);
-    return delivery;
+    if (id <= state.lastSubmittedId) return;
+    state.lastSubmittedId = id;
+    const history = conversation.slice();
+    conversation.push(Array.from(text).slice(0, TURN_LIMIT).join(''));
+    if (conversation.length > contextTurns) conversation.shift();
+    if (state.deliveries.size >= MAX_DELIVERIES) {
+      add(state, 'overflows'); add(state, 'failures');
+      emit({ type: 'error', scope: 'translate', id, code: 'translation_overflow', message: '翻译队列已满' });
+      return;
+    }
+    state.deliveries.set(id, { snapshot: requestSnapshot(text, history), queuedAt: performance.now() });
+    state.queue.push(id);
+    if (state.timer === null && state.active < TRANSLATION_CONCURRENCY) {
+      state.timer = setTimeout(() => {
+        state.timer = null;
+        pumpTranslations(state, ticket);
+      }, 0);
+    }
+  }
+
+  function pumpTranslations(state, ticket) {
+    if (!validTranslation(ticket, state)) return;
+    while (state.active < TRANSLATION_CONCURRENCY && state.queue.length) {
+      const id = state.queue.shift();
+      state.active++;
+      deliverTranslation(id, state, ticket).finally(() => {
+        state.deliveries.delete(id);
+        state.active--;
+        pumpTranslations(state, ticket);
+      });
+    }
+  }
+
+  async function deliverTranslation(id, state, ticket) {
+    const { snapshot, queuedAt } = state.deliveries.get(id);
+    try {
+      if (performance.now() - queuedAt >= MAX_QUEUE_MS) throw new DOMException('queue timeout', 'AbortError');
+      if (!snapshot.apiKey) throw new Error('未填写 DeepSeek API Key');
+      const result = await requestTranslation(snapshot, state, ticket);
+      if (!validTranslation(ticket, state)) return;
+      add(state, 'succeeded');
+      state.lastTranslatedSegment = Math.max(state.lastTranslatedSegment, id);
+      translateCount++; translateMsTotal += performance.now() - queuedAt;
+      emit({ type: 'translation', id, final: true, text: result.text, source: result.source,
+        engine: result.source === 'cache' ? 'deepseek:cache' : 'deepseek', ms: result.ms });
+    } catch (error) {
+      if (!validTranslation(ticket, state)) return;
+      add(state, 'failures');
+      const timedOut = error.name === 'AbortError';
+      if (timedOut) add(state, 'timeouts');
+      const safe = ['未填写 DeepSeek API Key', '翻译结果为空或不完整', '翻译结果为空', '翻译文本过长'].includes(error.message)
+        || /^HTTP \d+$/.test(error.message) ? error.message : '请求失败';
+      emit({ type: 'error', scope: 'translate', id, code: timedOut ? 'translation_timeout' : 'translation_failed',
+        message: timedOut ? '翻译请求超时' : '翻译失败：' + safe });
+    }
   }
 
   // ------------------------------------------------------------ audio pipeline
@@ -460,17 +618,20 @@
   }
 
   function feedVad(data) {
-    let pending = vadPending.length ? new Float32Array(vadPending.length + data.length) : data;
+    const pending = vadPending.length ? new Float32Array(vadPending.length + data.length) : data;
     if (vadPending.length) {
       pending.set(vadPending, 0);
       pending.set(data, vadPending.length);
     }
+    const start = totalSamples - pending.length;
     let off = 0;
     while (pending.length - off >= VAD_WINDOW) {
       vad.acceptWaveform(pending.subarray(off, off + VAD_WINDOW));
       off += VAD_WINDOW;
+      advanceVad(start + off);
     }
     vadPending = pending.slice(off);
+    return start + off;
   }
 
   function decode(samples) {
@@ -493,75 +654,82 @@
     return domainCorrector.correct(normalizeJa(text));
   }
 
-  function resetSegment() {
-    segStart = totalSamples;
+  function resetSegment(end) {
+    segStart = end;
     lastHyp = '';
     lastText = '';
     lastPartialAt = 0;
   }
 
-  function finishSegment(audio, start) {
+  function finishSegment(audio, start, forced = false) {
+    const end = start + audio.length;
+    if (end <= finalizedUntil) return;
+    const overlap = lastForcedText ? Math.round(vadConfig.overlap * SAMPLE_RATE) : 0;
+    const offset = Math.max(0, finalizedUntil - overlap - start);
+    audio = audio.subarray(offset);
+    finalizedUntil = end;
+    const previous = overlap ? lastForcedText : '';
+    lastForcedText = '';
     busy = true;
     try {
-      const end = start + audio.length;
-      audio = audio.subarray(Math.max(0, finalizedUntil - start));
-      finalizedUntil = Math.max(finalizedUntil, end);
       if (audio.length < SAMPLE_RATE * 0.3) return;
-      const text = decode(audio);
+      const text = trimOverlap(previous, decode(audio));
       if (!text) return;
+      lastForcedText = forced && vadConfig.overlap ? text : '';
       finals++;
       const id = segId++;
       emit({
         type: 'final',
         id,
         text,
-        t: +(totalSamples / SAMPLE_RATE).toFixed(2),
+        t: +(end / SAMPLE_RATE).toFixed(2),
+        t_start: +((start + offset) / SAMPLE_RATE).toFixed(2),
+        forced,
         decode_ms: Math.round(lastDecodeMs),
       });
       lastText = text;
-      scheduleTranslation(id, text, true);
+      scheduleTranslation(id, text);
     } finally {
       busy = false;
-      resetSegment();
+      resetSegment(end);
     }
   }
 
-  function feed(samples) {
-    if (!ready || !started) return;
-    append(samples);
-    feedVad(samples);
-    if (busy) return;
-
+  function advanceVad(end) {
+    while (!vad.isEmpty()) {
+      const seg = vad.front();
+      vad.pop();
+      finishSegment(seg.samples, seg.start);
+    }
     const inSpeech = vad.isDetected();
     if (inSpeech && !speaking) {
-      speaking = true;
-      segStart = Math.max(0, totalSamples - Math.round(0.35 * SAMPLE_RATE));
+      segStart = Math.max(finalizedUntil, end - Math.round(0.35 * SAMPLE_RATE));
       lastPartialAt = 0;
       emit({ type: 'speech_start', id: segId });
     } else if (!inSpeech && speaking) {
-      speaking = false;
-      if (!vad.isEmpty()) {
-        const seg = vad.front();
-        const audio = seg.samples;
-        vad.pop();
-        finishSegment(audio, seg.start);
-      } else {
-        resetSegment();
-      }
-      return;
+      lastForcedText = '';
+      resetSegment(end);
     }
+    speaking = inSpeech;
+    const boundary = segStart + Math.round(vadConfig.maxSegment * SAMPLE_RATE);
+    if (speaking && end >= boundary) {
+      const start = Math.max(0, segStart - (lastForcedText ? Math.round(vadConfig.overlap * SAMPLE_RATE) : 0));
+      finishSegment(slice(start, boundary), start, true);
+    }
+  }
 
+  function feed(samples, suppressPreview = false) {
+    if (!ready || !started || busy || !samples.length) return;
+    append(samples);
+    const end = feedVad(samples);
     if (!speaking) return;
-    const dur = (totalSamples - segStart) / SAMPLE_RATE;
-    if (dur >= MAX_SEGMENT_SEC) {
-      finishSegment(slice(segStart, totalSamples), segStart);
-      return;
-    }
+    const dur = (end - segStart) / SAMPLE_RATE;
     const now = Date.now();
     if (dur >= MIN_PARTIAL_SEC && now - lastPartialAt >= partialInterval) {
       lastPartialAt = now;
-      const from = Math.max(segStart, totalSamples - MAX_WINDOW_SEC * SAMPLE_RATE);
-      const audio = slice(from, totalSamples);
+      if (suppressPreview) { previewBacklogSkips++; return; }
+      const from = Math.max(segStart, end - MAX_WINDOW_SEC * SAMPLE_RATE);
+      const audio = slice(from, end);
       busy = true;
       try {
         const text = decode(audio);
@@ -569,7 +737,7 @@
           const stable = lastHyp ? commonPrefix(lastHyp, text) : text;
           lastHyp = text;
           lastText = text;
-          emit({ type: 'partial', id: segId, text, stable, t: +(totalSamples / SAMPLE_RATE).toFixed(2) });
+          emit({ type: 'partial', id: segId, text, stable, t: +(end / SAMPLE_RATE).toFixed(2) });
           // ASR previews can still change. Submit only the finalized segment
           // to avoid translating the beginning of one sentence twice.
         }
@@ -628,10 +796,17 @@
       if (epoch === generation) emit({ type: 'progress', message });
     };
     try {
+      vadConfig = vadSettings(config.vad);
       await abortable(loadDomain(), signal);
       signal.throwIfAborted();
+      const mode = ['auto', 'off'].includes(config.domainMode) ? config.domainMode : 'manual';
+      const episode = mode === 'auto' ? await findEpisode(config.pageTitle, signal) : null;
+      const turns = CONTEXT_WINDOWS.includes(config.contextTurns) ? config.contextTurns : 1;
+      const glossary = turns > 1 ? await loadGlossary(signal) : null;
+      signal.throwIfAborted();
       setConfig({ target: config.target || 'zh', apiKey: config.apiKey || '', model: config.model || 'deepseek-chat',
-        asrPacks: config.asrPacks ?? config.asrDomain ?? 'gakumas',
+        asrPacks: mode === 'manual' ? config.asrPacks ?? config.asrDomain ?? 'gakumas' : episode ? [episode.pack] : [],
+        domainMode: mode, episode, contextTurns: glossary ? turns : 1, glossary,
         baseUrl: config.baseUrl || 'https://api.deepseek.com', promptVersion: config.promptVersion || PROMPT_VERSION,
         temperature: config.temperature ?? 0.2, maxTokens: config.maxTokens ?? 512 });
       const files = await loadModels(config, progress, signal);
@@ -668,7 +843,7 @@
       sileroVad: {
         model: '/silero_vad.onnx',
         threshold: 0.5,
-        minSilenceDuration: 0.4,
+        minSilenceDuration: vadConfig.minSilence,
         minSpeechDuration: 0.25,
         maxSpeechDuration: 20,
         windowSize: 512,
@@ -701,6 +876,9 @@
       rtf: decodeCount ? +(decodeMsTotal / 1000 / Math.max(totalSamples / SAMPLE_RATE, 0.01)).toFixed(3) : 0,
       finals,
       asr_packs: asrPacks?.slice() ?? [],
+      domain: { mode: domainMode, episode: activeEpisode?.episode || '', franchise: activeEpisode?.franchise || '' },
+      vad: { ...vadConfig },
+      preview_backlog_skips: previewBacklogSkips,
       translations: translateCount,
       translation: translationStats(),
       avg_translate_ms: translateCount ? Math.round(translateMsTotal / translateCount) : 0,
@@ -714,12 +892,15 @@
     started = ready = false;
     resetTranslationState();
     onEvent = () => {};
-    apiKey = finalContext = lastHyp = lastText = '';
+    apiKey = lastHyp = lastText = '';
     chunks.length = 0;
     vadPending = new Float32Array(0);
     totalSamples = segStart = segId = lastPartialAt = finalizedUntil = 0;
+    lastForcedText = '';
+    vadConfig = DEFAULT_VAD;
     speaking = busy = false;
     partialInterval = PARTIAL_INTERVAL;
+    previewBacklogSkips = 0;
     decodeMsTotal = decodeCount = finals = translateCount = translateMsTotal = lastDecodeMs = 0;
     recognizer?.free();
     vad?.free();

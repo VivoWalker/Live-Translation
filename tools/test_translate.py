@@ -17,6 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from server.translate import DeepSeekTranslator, TranslationPipeline, create_translator  # noqa: E402
 from server.translation_cache import TranslationStats  # noqa: E402
+from server.benchmark import latency_summary  # noqa: E402
+from server.conversation import ConversationContext, Glossary  # noqa: E402
+from server.episodes import EpisodeCatalog  # noqa: E402
 
 CASES = [
     ("昨日の試合はとても面白かったですね。", "最後の一点が決め手でした。"),
@@ -27,19 +30,69 @@ CASES = [
     ("", "ありがとうございました。また何かあればいつでもご連絡ください。"),
 ]
 
+CONTEXT_CASES = (
+    (("このあと、藤田ことねの歌を流します。", "それ、前の回でも聴いたね。", "うん、あの子の曲だよ。"),
+     "あ、違う。藤田ことねが選んだ曲のほう！"),
+    (("学園アイドルマスターの話に戻ろう。", "初星学園HR、昨日だったっけ？", "ううん、来週だって。"),
+     "えー、もうカレンダーに書いちゃったよ。"),
+)
+
+
+async def probe_context(translator, target):
+    domain = EpisodeCatalog().resolve("auto", title="初星学園HR")
+    glossary = Glossary.load()
+    stats = TranslationStats()
+    rows = []
+    for case_id, (history, current) in enumerate(CONTEXT_CASES, 1):
+        conversation = ConversationContext()
+        for line in history:
+            conversation.remember(line)
+        variants = (("classic", 1), ("multiturn", 3))
+        if case_id % 2 == 0:
+            variants = tuple(reversed(variants))
+        for variant, window in variants:
+            context = conversation.snapshot(current, target, window, glossary, domain)
+            request = translator.request(current, target, context)
+            start = time.perf_counter()
+            try:
+                result = await translator.send(request, stats)
+                rows.append({"case": case_id, "variant": variant, "elapsed_ms": round((time.perf_counter() - start) * 1000, 1),
+                             "prompt_version": request.prompt_version, "usage": result.usage, "completed": True})
+            except (RuntimeError, OSError):
+                rows.append({"case": case_id, "variant": variant, "completed": False})
+    latency = {variant: latency_summary(row["elapsed_ms"] for row in rows if row["variant"] == variant and row["completed"])
+               for variant in ("classic", "multiturn")}
+    return {"verified": all(row["completed"] for row in rows), "model": translator.model, "target": target,
+            "requests": rows, "latency": latency, "totals": stats.snapshot()}
+
 
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--engine", default="deepseek")
-    ap.add_argument("--target", default="zh")
+    ap.add_argument("--target", choices=("zh", "en"), default="zh")
     ap.add_argument("--repeat", type=int, default=1)
-    ap.add_argument("--probe-cache", action="store_true", help="Three real API calls; bypass local reuse")
+    probes = ap.add_mutually_exclusive_group()
+    probes.add_argument("--probe-cache", action="store_true", help="Three real API calls; bypass local reuse")
+    probes.add_argument("--probe-context", action="store_true", help="Four real API calls on synthetic dialogue")
     ap.add_argument("--report", type=Path, help="Save usage/latency only; never dialogue or credentials")
     args = ap.parse_args()
 
     cfg_path = Path(__file__).resolve().parent.parent / "config.local.json"
     cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
     pipe = TranslationPipeline(create_translator(args.engine, cfg.get("deepseek_api_key")))
+    if args.probe_context:
+        if not isinstance(pipe.tr, DeepSeekTranslator):
+            ap.error('--probe-context requires DeepSeek')
+        try:
+            report = await probe_context(pipe.tr, args.target)
+        finally:
+            await pipe.close()
+            await pipe.tr.close()
+        serialized = json.dumps(report, ensure_ascii=False, indent=2)
+        if args.report:
+            args.report.write_text(serialized, encoding="utf-8")
+        print(serialized)
+        return 0 if report["verified"] else 1
     if args.probe_cache:
         if not isinstance(pipe.tr, DeepSeekTranslator):
             ap.error('--probe-cache requires DeepSeek')

@@ -3,16 +3,48 @@ from __future__ import annotations
 
 import os
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 import numpy as np
 import sherpa_onnx
 
-from .asr_domain import DomainCorrector
+from .asr_domain import Correction, DomainCorrector
 from .text import normalize_ja
 
 SAMPLE_RATE = 16000
+PROVIDERS = ("sensevoice", "whisper", "parakeet", "whisper-turbo", "qwen3-asr")
+
+
+@dataclass(frozen=True)
+class Capabilities:
+    languages: tuple[str, ...] = ("ja",)
+    timestamps: bool = False
+    context_prompt: bool = False
+    partial_transcription: bool = True
+    streaming: bool = False
+    device: str = "cpu"
+    precision: str = "int8"
+
+
+@dataclass(frozen=True)
+class RecognitionContext:
+    previous: str = ""
+    terms: tuple[str, ...] = ()
+    corrector: DomainCorrector | None = None
+
+    @property
+    def prompt(self) -> str:
+        return "、".join(self.terms[:12])[:200]
+
+
+@dataclass(frozen=True)
+class Recognition:
+    text: str
+    original: str
+    timestamps: tuple[tuple[float, float, str], ...] = ()
+    changes: tuple[Correction, ...] = ()
 
 
 class Recognizer(Protocol):
@@ -21,7 +53,11 @@ class Recognizer(Protocol):
     partial_interval: float
     min_partial_speech: float
 
-    def transcribe(self, audio: np.ndarray) -> str: ...
+    def transcribe(self, audio: np.ndarray, context: RecognitionContext | None = None) -> str: ...
+
+
+class BackendUnavailable(RuntimeError):
+    pass
 
 
 def _candidate_dirs() -> list[Path]:
@@ -113,24 +149,38 @@ def resample_to_16k(audio: np.ndarray, sr: int) -> np.ndarray:
 class _OfflineRecognizer:
     """Serialize native inference across sessions sharing one model."""
 
-    def transcribe(self, audio: np.ndarray) -> str:
+    capabilities = Capabilities()
+    mode = "fast"
+
+    def transcribe(self, audio: np.ndarray, context: RecognitionContext | None = None) -> str:
+        return self.recognize(audio, context).text
+
+    def recognize(self, audio: np.ndarray, context: RecognitionContext | None = None) -> Recognition:
         audio = np.ascontiguousarray(audio, dtype=np.float32)
         if audio.size < SAMPLE_RATE * 0.2:
-            return ""
+            return Recognition("", "")
         with self._lock:
-            stream = self._rec.create_stream()
-            stream.accept_waveform(SAMPLE_RATE, audio)
-            self._rec.decode_stream(stream)
-            text = (stream.result.text or "").strip()
+            result = self._infer(audio, context)
+        text = result.text
         if self.language == "ja":
-            text = self.domain.correct(normalize_ja(text))
-        return text
+            corrector = context.corrector if context and context.corrector is not None else self.domain
+            text, changes = corrector.explain(normalize_ja(result.text))
+            return Recognition(text, result.original, result.timestamps, changes)
+        return result
+
+    def _infer(self, audio: np.ndarray, context: RecognitionContext | None) -> Recognition:
+        stream = self._rec.create_stream()
+        stream.accept_waveform(SAMPLE_RATE, audio)
+        self._rec.decode_stream(stream)
+        text = (stream.result.text or "").strip()
+        return Recognition(text, text)
 
 
 class SenseVoiceRecognizer(_OfflineRecognizer):
     """Thin, thread-safe wrapper around sherpa-onnx SenseVoiceSmall."""
 
     name = "sensevoice-int8"
+    capabilities = Capabilities(languages=("ja", "zh", "en", "ko", "yue", "auto"))
     partial_interval = 0.6
     min_partial_speech = 0.9
 
@@ -156,6 +206,7 @@ class WhisperRecognizer(_OfflineRecognizer):
 
     partial_interval = 2.0
     min_partial_speech = 2.0
+    capabilities = Capabilities(languages=("ja", "auto"))
 
     def __init__(self, model_dir: str | None = None, language: str = "ja", num_threads: int = 4,
                  asr_domain: str | list[str] = "gakumas", asr_terms: str | None = None):
@@ -179,14 +230,33 @@ class WhisperRecognizer(_OfflineRecognizer):
 
 def create_recognizer(engine: str = "sensevoice", model_dir: str | None = None,
                       language: str = "ja", num_threads: int = 4,
-                      asr_domain: str | list[str] = "gakumas", asr_terms: str | None = None) -> Recognizer:
-    if num_threads < 1:
-        raise ValueError("ASR threads must be at least 1")
+                      asr_domain: str | list[str] = "gakumas", asr_terms: str | None = None,
+                      *, device: str = "cpu", precision: str | None = None) -> Recognizer:
+    if not 1 <= num_threads <= 64:
+        raise ValueError("ASR threads must be at least 1 and at most 64")
+    if device not in ("cpu", "cuda"):
+        raise ValueError("ASR device must be cpu or cuda")
     backends = {"sensevoice": SenseVoiceRecognizer, "whisper": WhisperRecognizer}
-    if engine not in backends:
+    if engine not in PROVIDERS:
         raise ValueError(f"Unknown ASR backend: {engine}")
-    return backends[engine](model_dir=model_dir, language=language, num_threads=num_threads,
-                            asr_domain=asr_domain, asr_terms=asr_terms)
+    options = dict(model_dir=model_dir, language=language, num_threads=num_threads,
+                   asr_domain=asr_domain, asr_terms=asr_terms)
+    if engine in backends:
+        if device != "cpu" or precision not in (None, "int8"):
+            raise ValueError("The sherpa-onnx backends use CPU int8")
+        return backends[engine](**options)
+    from .asr_backends import OPTIONAL_BACKENDS
+    return OPTIONAL_BACKENDS[engine](**options, device=device, precision=precision)
+
+
+@dataclass(frozen=True)
+class SpeechSpan:
+    start: int
+    samples: np.ndarray
+
+    @property
+    def end(self) -> int:
+        return self.start + len(self.samples)
 
 
 class SileroVad:
@@ -208,6 +278,9 @@ class SileroVad:
         self._vad.accept_waveform(audio)
 
     def pop_segments(self, since: int = 0) -> list[np.ndarray]:
+        return [span.samples for span in self.pop_spans(since)]
+
+    def pop_spans(self, since: int = 0) -> list[SpeechSpan]:
         out = []
         while not self._vad.empty():
             seg = self._vad.front
@@ -216,7 +289,7 @@ class SileroVad:
             # detector still returns the whole utterance when silence arrives.
             offset = max(0, since - seg.start)
             if offset < len(samples):
-                out.append(samples[offset:])
+                out.append(SpeechSpan(seg.start + offset, samples[offset:]))
             self._vad.pop()
         return out
 

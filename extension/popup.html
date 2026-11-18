@@ -32,7 +32,8 @@
           <span>运行模式</span>
           <select id="engine">
             <option value="browser">浏览器内</option>
-            <option value="server">本地服务</option>
+            <option value="server">本地快速</option>
+            <option value="server-enhanced">本地增强</option>
           </select>
         </label>
         <label class="field">
@@ -45,6 +46,14 @@
         <label class="field wide" id="apikey-field">
           <span>DeepSeek API Key</span>
           <input id="apikey" type="password" placeholder="sk-…" autocomplete="off">
+        </label>
+        <label class="field wide">
+          <span>领域上下文</span>
+          <select id="domain-mode">
+            <option value="manual">手动</option>
+            <option value="auto">按标题自动选择</option>
+            <option value="off">关闭</option>
+          </select>
         </label>
         <fieldset class="lexicon-field wide" id="asr-domain-field">
           <legend>专名词库</legend>
@@ -62,8 +71,50 @@
         </label>
         <label class="field wide" id="token-field" hidden>
           <span>本地服务访问令牌</span>
-          <input id="server-token" type="password" placeholder="输入终端显示的令牌" autocomplete="off">
+          <input id="server-token" type="password" placeholder="输入本地访问令牌" autocomplete="off">
         </label>
+        <details class="advanced wide">
+          <summary>高级设置</summary>
+          <div class="fields advanced-fields">
+            <label class="field wide">
+              <span>翻译上下文</span>
+              <select id="context-turns">
+                <option value="1">上一句</option>
+                <option value="3">最近 3 句与译名词表</option>
+                <option value="4">最近 4 句与译名词表</option>
+                <option value="5">最近 5 句与译名词表</option>
+              </select>
+            </label>
+            <label class="field" id="vad-silence-field">
+              <span>静音断句</span>
+              <select id="vad-silence">
+                <option value="0.4">0.4 秒</option>
+                <option value="0.6">0.6 秒</option>
+                <option value="0.8">0.8 秒</option>
+              </select>
+            </label>
+            <label class="field" id="vad-segment-field">
+              <span>最长分段</span>
+              <select id="vad-segment">
+                <option value="8">8 秒</option>
+                <option value="12" selected>12 秒</option>
+                <option value="16">16 秒</option>
+              </select>
+            </label>
+            <label class="field wide" id="agent-field" hidden>
+              <span>Agent 复查</span>
+              <select id="agent-mode">
+                <option value="default">按运行模式</option>
+                <option value="on">启用</option>
+                <option value="off">关闭</option>
+              </select>
+            </label>
+            <label class="remote-consent wide" id="remote-field" hidden>
+              <input id="allow-remote" type="checkbox">允许将标签页音频发送到远程服务
+            </label>
+            <p class="advanced-note wide" id="service-note" hidden>模型和录播说话人分离由本地服务配置。</p>
+          </div>
+        </details>
       </div>
       <p class="model-cache" id="model-cache-status" hidden></p>
     </section>
@@ -76,11 +127,13 @@
 
   <footer class="popup-footer">
     <p id="message" class="message" role="status" hidden></p>
+    <button id="browser-fallback" type="button" class="button" hidden>切换到浏览器内</button>
     <button id="start" type="button" class="button primary" disabled><span class="play-icon" aria-hidden="true"></span>开始字幕</button>
     <button id="stop" type="button" class="button stop" hidden><span class="stop-icon" aria-hidden="true"></span>停止字幕</button>
   </footer>
   <script src="caption-settings.js"></script>
   <script src="asr-domain.js"></script>
+  <script src="service-url.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

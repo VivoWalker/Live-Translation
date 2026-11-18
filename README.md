@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-2563eb.svg)](LICENSE)
 [![Chrome / Edge](https://img.shields.io/badge/Chrome%20%2F%20Edge-116%2B-334155.svg)](extension/manifest.json)
 
-[快速开始](#快速开始) · [本地服务](docs/local-service.md) · [专名词表](docs/asr-domain.md) · [开发文档](docs/development.md)
+[快速开始](#快速开始) · [本地服务](docs/local-service.md) · [专名词表](docs/asr-domain.md) · [Benchmark](docs/benchmark.md)
 
 </div>
 
@@ -53,14 +53,13 @@
 
 ### 选择运行方式
 
-| | 浏览器内 · 默认 | 本地服务 · 可选 |
-| --- | --- | --- |
-| 语音识别 | SenseVoiceSmall int8，WASM | SenseVoice 或实验性 Whisper int8 |
-| 翻译 | 扩展直接请求 DeepSeek | Python 服务请求 DeepSeek |
-| 安装要求 | 浏览器扩展 | 扩展与 Python 服务；也提供独立演示页 |
-| 适合 | 日常观看、希望安装步骤更少 | 希望利用 CPU 多线程、试用 Whisper 或调试 |
+| | 浏览器内 · 默认 | 本地快速 | 本地增强 · 实验 |
+| --- | --- | --- | --- |
+| 语音识别 | SenseVoiceSmall int8，WASM | SenseVoice、Whisper Base 或日语 Parakeet | Whisper Large V3 Turbo、Qwen3-ASR，可选复查 |
+| 翻译 | 扩展请求 DeepSeek | Python 服务请求 DeepSeek | Python 服务请求 DeepSeek |
+| 安装要求 | 浏览器扩展 | 扩展与本地服务 | 本地权重、可选推理框架和适合的硬件 |
 
-本地服务通过 WebSocket 接收音频，需要单独的访问令牌。模型准备、Windows / Linux / macOS 安装及 Whisper 切换见 [本地服务指南](docs/local-service.md)。
+本地服务通过 WebSocket 接收音频，需要独立的访问令牌。弹窗显示已连接的实际识别模型，并可在失败后切换回浏览器模式。 [本地服务指南](docs/local-service.md) · [模型、精度与制品体积](docs/model-comparison.md)
 
 ## 专名识别
 
@@ -73,26 +72,26 @@
 | ぽぴぱ、バンドリのラス | ポピパ、バンドリのRAS |
 | にじがく、セイハス | ニジガク、せーはす |
 
-在扩展弹窗的「专名词库」中可分别勾选陽高真白、学マス、BanG Dream!、Love Live!、通用声优与动画。选择在下次开始字幕时生效。
+在扩展弹窗选择「领域上下文」。手动模式沿用原有词库选择，自动模式按标签页标题启用相关词包。也可关闭词库。选择在下次开始字幕时生效。
 
-词表属于文本纠错，模型权重保持原版。目前没有这些节目的标注音频，尚未量化识别准确率提升。维护方法和误改控制见 [日语领域识别说明](docs/asr-domain.md)。
+本地 Agent 可在预算内对疑难片段追加一次本机识别。异常或超时会回到主模型结果。可选的 SQLite 审核保存原假设、原因和来源，支持人工确认及留出集校验。目标节目的准确率仍需使用授权标注音频评估。 [领域词表](docs/asr-domain.md) · [复查与审核](docs/agentic-asr.md)
 
 ## 翻译与数据流
 
 ```mermaid
 flowchart LR
     A[标签页音频] --> B[16 kHz PCM / VAD]
-    B --> C[SenseVoice / Whisper]
+    B --> C[浏览器 SenseVoice 或本地 ASR]
     C --> D[日语预览与最终分段]
-    D -->|仅最终分段| E[会话内复用与 DeepSeek 翻译]
+    D -->|每个 final| E[上下文快照与分段翻译]
     D --> F[网页双语字幕]
     E --> F
 ```
 
-- **音频**：浏览器内模式在本机识别；服务模式将 PCM 发送到配置的服务地址，默认 `127.0.0.1`。音频不提交给 DeepSeek 翻译接口。
-- **台词**：翻译请求包含当前句与作为上下文的上一句日语，不累计整段会话。日语预览不触发翻译请求；连续长语音仍有 12 秒分段上限。
-- **凭据**：浏览器模式的 Key 保存在扩展本地存储；服务模式使用本地配置或环境变量。`config.local.json` 已被 Git 忽略。
-- **复用**：译文缓存只存在于当前会话内存，最多 500 条、1 MiB；停止、重启或配置切换后清理。不同上下文不混用译文。
+- 浏览器内模式在本机识别。服务模式默认将 PCM 送到 `127.0.0.1`。远程模式要求 `wss://` 并单独授权发送音频。
+- DeepSeek 接收当前句和固定的会话上下文。默认包含上一句，也可选最近 3–5 句、节目和中英译名。字幕按 ID 回填异步译文。
+- 浏览器凭据保存在扩展本地存储。本地服务从本机配置或环境变量读取翻译凭据。`config.local.json` 已被 Git 忽略。
+- 翻译缓存保留在当前会话内存，最多 500 条、1 MiB。停止、重启或相关配置切换会清理状态。
 
 本地缓存和请求合并减少的是实际 API 调用。固定请求前缀不保证 DeepSeek 服务端缓存命中，实际费用取决于输入、输出与服务方计费。请求结构、usage 统计及少量真实 API 对照记录见 [翻译与用量说明](docs/translation.md)。
 
@@ -106,9 +105,7 @@ python -m unittest discover -s tests
 node --test tests/*.test.mjs
 ```
 
-当前版本已通过 **59 项 Python 测试、57 项 JavaScript 测试**，并完成 Chromium 字幕交互和真实 SenseVoice WASM 样本识别。完整安装后的 `tabCapture` 流程仍需浏览器实际交互。
-
-架构、协议、测试工具与验证边界见 [开发指南](docs/development.md)；版本变更见 [CHANGELOG](CHANGELOG.md)。
+开发分支包含 Python、JavaScript、WebSocket 与 Chromium 回归，以及同条件 CPU 模型对照。 [架构](docs/architecture.md) · [开发指南](docs/development.md) · [Benchmark](docs/benchmark.md) · [验收报告](docs/acceptance.md) · [CHANGELOG](CHANGELOG.md)
 
 ## 使用边界与排查
 
@@ -121,7 +118,7 @@ node --test tests/*.test.mjs
 | --- | --- |
 | 每次重开都提示下载模型 | 查看弹窗的缓存保存提示，确认存储可用，并保持原扩展 ID。 |
 | 有日文但没有译文 | 检查 DeepSeek Key、网络与 API 额度；失败信息会显示在扩展中。 |
-| 本地服务连接失败 | 确认服务已启动、地址正确，并填写服务显示的访问令牌。 |
+| 本地服务连接失败 | 确认服务地址正确，使用配置的访问令牌或默认 `out/access-token` 文件中的值。 |
 | 字幕未出现在网页上 | 重新加载扩展后刷新视频页，确认页面有声音且允许采集。 |
 | 专名被错误替换 | 关闭专名纠错，或按词表指南收紧相应别名与语境规则。 |
 

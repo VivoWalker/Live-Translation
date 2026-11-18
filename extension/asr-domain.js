@@ -19,7 +19,7 @@
     }
     return PACKS.filter(pack => selection.includes(pack));
   }
-  function read(data, profile = 'gakumas') {
+  function read(data, profile = 'gakumas', source = 'custom') {
     if (!data || data.version !== 1 || !Array.isArray(data.entries) || data.entries.length > MAX_ENTRIES ||
         !data.cues || typeof data.cues !== 'object' || Array.isArray(data.cues)) throw new Error('识别词表格式错误');
     const cues = new Map();
@@ -53,7 +53,7 @@
         if (alias === entry.term || aliases.has(alias)) throw new Error('识别词表存在重复别名');
         aliases.add(alias);
         if (profile !== 'off' && (profile === 'gakumas' || entry.scope !== 'gakumas')) {
-          rules.push({ alias, term: entry.term, cues: aliasCues, katakanaBoundary });
+          rules.push({ alias, term: entry.term, cues: aliasCues, katakanaBoundary, source });
         }
       }
     }
@@ -83,8 +83,9 @@
     const boundary = (text, offset, alias) => {
       return !(latin(alias[0]) && latin(text[offset - 1])) && !(latin(alias.at(-1)) && latin(text[offset + alias.length]));
     };
-    return Object.freeze({ correct(text) {
-      if (typeof text !== 'string' || !rules.length || length(text) > MAX_TEXT) return text;
+    function explain(text) {
+      const changes = [];
+      if (typeof text !== 'string' || !rules.length || length(text) > MAX_TEXT) return { text, changes };
       // Scan only the original hypothesis, longest match first. A replacement
       // cannot trigger another replacement or corrupt an existing proper name.
       let result = '', offset = 0;
@@ -101,19 +102,57 @@
           return rule.cues.some(cue => before.includes(cue) || after.includes(cue));
         });
         if (protectedTerm && (!rule || protectedTerm.length >= rule.alias.length)) { result += protectedTerm; offset += protectedTerm.length; }
-        else if (rule) { result += rule.term; offset += rule.alias.length; }
+        else if (rule) {
+          changes.push({ alias: rule.alias, canonical: rule.term, start: offset, end: offset + rule.alias.length, source: rule.source });
+          result += rule.term;
+          offset += rule.alias.length;
+        }
         else { result += char; offset += char.length; }
       }
-      return result;
-    } });
+      return { text: result, changes };
+    }
+    return Object.freeze({ explain, correct: text => explain(text).text });
   }
   function create(data, profile = 'gakumas') {
     if (!PROFILES.includes(profile)) throw new Error('未知的识别词表');
     return Object.freeze({ profile, ...compile([read(data, profile)]) });
   }
   function loadPacks(data) {
-    const packs = new Map(PACKS.map(id => [id, read(data[id])]));
-    return selection => compile(normalizePacks(selection).map(id => packs.get(id)));
+    const packs = new Map(PACKS.map(id => [id, read(data[id], 'gakumas', 'pack:' + id)]));
+    return (selection, episode) => {
+      const selected = normalizePacks(selection).map(id => packs.get(id));
+      return compile(episode ? selected.concat(episode.lexicon) : selected);
+    };
   }
-  globalThis.JLSASRDomain = Object.freeze({ create, loadPacks, normalizePacks, packs: Object.freeze(PACKS) });
+  function loadEpisodes(data) {
+    if (data?.version !== 1 || !Array.isArray(data.episodes) || data.episodes.length > 64) throw new Error('节目词表格式错误');
+    const source = value => {
+      if (typeof value !== 'string' || value.length > 300) throw new Error('节目词表缺少来源');
+      const url = new URL(value);
+      if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) throw new Error('节目词表来源无效');
+      return value;
+    };
+    const fold = text => text.normalize('NFKC').toLowerCase();
+    const rules = [];
+    for (const { episode = '', franchise, pack, title_contains: titles, terms = [], source: url } of data.episodes) {
+      if ((episode !== '' && !checkedString(episode)) || !checkedString(franchise) || !PACKS.includes(pack) ||
+          !Array.isArray(titles) || !titles.length || titles.length > 8 || !titles.every(t => checkedString(t, 3)) ||
+          !Array.isArray(terms) || terms.length > 32) throw new Error('节目词条格式错误');
+      const verifiedSource = source(url);
+      const lexicon = [];
+      for (const { canonical, verified = false, aliases = [], source: origin = verifiedSource } of terms) {
+        if (!checkedString(canonical) || typeof verified !== 'boolean' || !Array.isArray(aliases) ||
+            aliases.length > 8 || !aliases.every(alias => checkedString(alias, 3))) throw new Error('节目专名格式错误');
+        if (verified) lexicon.push(read({ version: 1, cues: {}, entries: [{ term: canonical, aliases }] }, 'gakumas', source(origin)));
+      }
+      const selection = { episode, franchise, pack, source: verifiedSource, lexicon };
+      rules.push(...titles.map(title => [fold(title), selection]));
+    }
+    rules.sort((a, b) => length(b[0]) - length(a[0]));
+    return title => {
+      const normalized = fold(typeof title === 'string' ? title.slice(0, 240) : '');
+      return rules.find(([match]) => normalized.includes(match))?.[1] || null;
+    };
+  }
+  globalThis.JLSASRDomain = Object.freeze({ create, loadPacks, loadEpisodes, normalizePacks, packs: Object.freeze(PACKS) });
 })();

@@ -1,5 +1,6 @@
 """Security regressions use real HTTP/WS handlers and a local fake API."""
 import asyncio
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,18 +13,22 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from server.app import AppState, build_app
-from server.security import MAX_BUFFERED_BYTES, MAX_CONNECTIONS, MAX_FRAME_BYTES, RateBudget
+from server.security import MAX_BUFFERED_BYTES, MAX_CONNECTIONS, MAX_FRAME_BYTES, RateBudget, local_access_token
 from server.streaming import StreamSession
-from server.translate import DeepSeekTranslator, MockTranslator, TranslationPipeline
+from server.translate import DeepSeekTranslator, MockTranslator, TranslationPipeline, create_translator
 
 TOKEN = 'local-test-access-token-0123456789abcdef'
 
 
 class FakeVad:
     in_speech = False
+    def __init__(self, **kwargs):
+        pass
+
     def accept(self, audio):
         pass
-    def pop_segments(self, since=0):
+
+    def pop_spans(self, since=0):
         return []
 
 
@@ -73,6 +78,19 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
         async with self.client.ws_connect(self.server.make_url('/ws')) as ws:
             await ws.send_json({'type': 'auth', 'token': TOKEN})
             self.assertEqual((await ws.receive_json())['asr'], 'whisper-base-int8')
+
+    async def test_session_configuration_reports_actual_mode_and_disables_agent(self):
+        self.state.agent_enabled = True
+        async with await self.connect() as ws:
+            await ws.send_json({"type": "config", "target": "en", "mode": "enhanced",
+                                "agent": False, "context_turns": 3, "domain": "auto",
+                                "page_title": "初星学園HR", "request_id": 7})
+            config = await ws.receive_json()
+            self.assertEqual(config["request_id"], 7)
+            self.assertEqual(config["asr_mode"], "fast")
+            self.assertFalse(config["agent"]["enabled"])
+            self.assertEqual(config["domain"]["episode"], "初星学園HR")
+            self.assertEqual(config["context_turns"], 3)
 
     async def test_wrong_token_or_audio_before_auth_closes(self):
         for first in ({'type': 'auth', 'token': 'wrong'}, {'type': 'config'}, None):
@@ -189,6 +207,27 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
         await session.close()
         self.assertEqual(session._queued_bytes, 0)
         self.assertTrue(session._q.empty())
+
+    async def test_default_service_without_key_preserves_asr_without_external_translation(self):
+        with patch.dict("os.environ", {"DEEPSEEK_API_KEY": ""}):
+            translator = TranslationPipeline(create_translator())
+        self.assertEqual(translator.engine, "disabled")
+        events = []
+        session = StreamSession(None, translator, events.append)
+        self.addAsyncCleanup(session.close)
+        self.assertIsNone(session._schedule_translation(0, "日語"))
+        self.assertEqual(events, [{"type": "translation_cancelled", "id": 0}])
+        self.assertEqual(session.translation_stats()["api_requests"], 0)
+
+    def test_default_token_file_reuses_token_and_explicit_token_bypasses_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ignored" / "token"
+            token = local_access_token(None, path)
+            self.assertEqual(len(token), 43)
+            self.assertEqual(local_access_token(None, path), token)
+            if os.name == "posix":
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(local_access_token(TOKEN, path), TOKEN)
 
     def test_rate_budget_has_bounded_burst_and_refill(self):
         with patch('server.security.time.monotonic', return_value=0):

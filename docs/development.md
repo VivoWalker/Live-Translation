@@ -10,7 +10,7 @@ Chrome / Edge 扩展
 ├── background  会话生命周期、事件中继、内容脚本注入
 ├── offscreen   标签页采集、音频回放、16 kHz PCM
 │   ├── 浏览器模式   SenseVoice WASM → VAD / 识别 → 翻译
-│   └── 服务模式     WebSocket → Python SenseVoice / Whisper → 翻译
+│   └── 服务模式     WebSocket → Python ASR / 可选复查 → 翻译
 └── content     共享字幕层、阅读队列、样式与拖动
 ```
 
@@ -18,7 +18,7 @@ Chrome / Edge 扩展
 
 日语 partial 更新预览，final 触发翻译。字幕层以分段 ID 回填，等待翻译期间保留原文。译文从实际展示起按长度计时，默认最短 3 秒，可调整阅读速度与最短停留。后句可为退场顺序延长停留，两次退场至少间隔 600 ms。悬停暂停与字幕动画可单独开关，动画始终遵循系统减少动态效果设置。
 
-`caption-settings.js` 供扩展菜单、字幕浮层与本地工作台共用。扩展通过后台保存并转发经校验的公开样式，本地页通过自己的浏览器存储保存。早期设置中的颜色、字号和拖动位置可以继续使用。
+`caption-settings.js` 供扩展菜单、字幕浮层与本地工作台共用。扩展通过后台保存并转发经校验的公开样式，本地页通过自己的浏览器存储保存。早期设置中的颜色、字号和拖动位置可以继续使用。 [架构变更](architecture.md)
 
 ## 目录
 
@@ -50,7 +50,7 @@ node --test tests/*.test.mjs
 
 测试覆盖固定提示词契约、上下文隔离、LRU 与请求合并、usage 缺失、失败重试、取消和配置切换；也覆盖词表正反例、识别输出到翻译的传递、字幕退场顺序及状态容量限制。单元测试不需要真实模型下载或 API Key。
 
-当前版本验证记录（2026-11-17）：59 项 Python、54 项 JavaScript 测试通过。两段普通日语音频在词表开关下输出一致；词表文本测试及普通音频回归均不能证明目标直播中的专名准确率提升。
+开发分支记录了翻译生命周期、拥塞、节目匹配、复查回退与模型适配的回归。评估目标直播的专名准确率需要带授权的节目转录。 [基线和提交规则](version-control.md) · [Benchmark](benchmark.md)
 
 ## 浏览器与长时间状态检查
 
@@ -90,6 +90,8 @@ JLS_CHROME=/path/to/chromium node tools/cache_check.mjs --model-dir /path/to/sen
 
 该工具使用临时浏览器配置与真实模型文件检查摘要、持久化和重开后的零模型下载；识别接口为桩，不连接翻译 API。`tools/browser_check.mjs` 用于服务演示页，需配置 `JLS_CHROME` 和 `JLSUBS_ACCESS_TOKEN`；完整扩展检查还要求浏览器允许加载未打包扩展。真实 `tabCapture` 链路需要用户点击授权，页面桩检查不代替这一步。
 
+开发分支完成 21 项 Chromium 界面、资源和 WASM 检查。约 595 秒连续识别产生 128 条 final 和 128 条测试译文。演示页用真实 AudioWorklet、认证 WebSocket 和 CPU 识别完成样本转写、mock 翻译、语言切换和停止。托管 Chromium 的管理员策略禁用了加载未打包扩展，工具栏 `tabCapture` 实装验收受此限制。
+
 ## 服务协议
 
 连接 `/ws` 后，第一条消息必须为 `{"type":"auth","token":"<访问令牌>"}`。认证成功后服务端发出 `ready`，客户端可发送 `{"type":"config","target":"zh"}`，以及 16 kHz、单声道、小端 float32 PCM 二进制帧。目标语言支持 `zh` / `en`。
@@ -103,6 +105,10 @@ JLS_CHROME=/path/to/chromium node tools/cache_check.mjs --model-dir /path/to/sen
 | 连接数 | 最多 8 个，含等待认证的连接 |
 
 正常客户端使用 100 ms、6400 字节的帧。服务端事件包括 `ready`、`partial`、`final`、`translation`、`translation_cancelled`、`stats` 和 `error`；取消事件带原句 `id`，供字幕层结束等待。模型与访问令牌配置见 [本地服务](local-service.md)，翻译统计见 [翻译与用量](translation.md)。
+
+关键事件按 FIFO 发送，容量为 64。预览与统计分别只保留最新一条。客户端收到配置确认时，上一语言已排队的结果已先行发出，仍在等待的分段会收到取消事件。关键输出或 ASR 音频积压超限时，服务以 1013 结束连接，界面提示重新开始。认证后的 `stats` 提供队列深度、峰值、丢弃的预览数、积压音频字节和跳过的预览次数。客户端音频发送缓冲区超过 64 KiB 时提示积压，达到 128 KiB 上限时结束采集。AudioWorklet 最多保留 20 个尚未确认的音频块。
+
+演示页使用可选整数 `request_id` 匹配语言设置确认。在确认前会抑制旧语言的译文回填，并在确认后重新显示当前语言的字幕。
 
 命令行模拟器从环境变量读取访问令牌：
 

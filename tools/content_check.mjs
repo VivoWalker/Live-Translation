@@ -37,7 +37,7 @@ const files = new Map([
     .map(name => ['/ext-assets/wasm/' + name, resolve('extension/wasm', name)]),
 ]);
 if (WASM) for (const file of files.values()) assert(existsSync(file), 'Missing real-model fixture: ' + file);
-const popupFiles = new Set(['popup.html', 'popup.css', 'interface.css', 'caption-settings.js', 'asr-domain.js', 'popup.js']);
+const popupFiles = new Set(['popup.html', 'popup.css', 'interface.css', 'caption-settings.js', 'asr-domain.js', 'service-url.js', 'popup.js']);
 const profile = mkdtempSync(join(tmpdir(), 'jls-content-'));
 const server = createServer((req, res) => {
   const popupFile = req.url.startsWith('/popup/') && req.url.slice('/popup/'.length);
@@ -134,6 +134,23 @@ async function checkPopupSizing() {
       if (scale === 1) {
         await evaluate(`document.querySelector('#asr-pack-mashiro').click()`);
         assert.deepEqual(await boxes(), ['asr-pack-mashiro']);
+      } else {
+        const configuration = await evaluate(`(() => {
+          document.querySelector('details.advanced').open = true;
+          const mode = document.querySelector('#engine');
+          mode.value = 'server-enhanced';
+          mode.dispatchEvent(new Event('change'));
+          const domain = document.querySelector('#domain-mode');
+          domain.value = 'auto';
+          domain.dispatchEvent(new Event('change'));
+          return { modes: Array.from(mode.options, option => option.value),
+            remoteVisible: !document.querySelector('#remote-field').hidden,
+            remoteOptIn: document.querySelector('#allow-remote').checked,
+            agentVisible: !document.querySelector('#agent-field').hidden,
+            packsHidden: document.querySelector('#asr-domain-field').hidden };
+        })()`);
+        assert.deepEqual(configuration, { modes: ['browser', 'server', 'server-enhanced'],
+          remoteVisible: true, remoteOptIn: false, agentVisible: true, packsHidden: true });
       }
       const layout = await evaluate(`(() => {
         const heading = document.querySelector('.popup-header h1');
@@ -150,6 +167,7 @@ async function checkPopupSizing() {
   }
   checks.push('popup requests its full width from a small initial viewport at 1× and 1.5× and keeps its footer visible');
   checks.push('popup migrates the former off setting and restores an individually selected word pack');
+  checks.push('enhanced popup exposes Agent and leaves remote audio unchecked');
 }
 async function stressCaptions() {
   await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });

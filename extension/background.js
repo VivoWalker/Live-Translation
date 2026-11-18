@@ -1,6 +1,6 @@
 /* Capture ownership and routing are tied to an immutable session id. */
 'use strict';
-importScripts('caption-settings.js', 'asr-domain.js');
+importScripts('caption-settings.js', 'asr-domain.js', 'service-url.js');
 const OFFSCREEN_PATH = 'offscreen.html';
 const DEFAULT_SERVER = 'ws://127.0.0.1:8765/ws';
 const state = { tabId: null, running: false, sessionId: null };
@@ -27,9 +27,12 @@ async function ensureContentScript(tabId) {
   try { if ((await chrome.tabs.sendMessage(tabId, { type: 'jls:ping' }))?.ok) return; } catch {}
   await chrome.scripting.executeScript({ target: { tabId }, files: ['caption-settings.js', 'caption-overlay.js', 'content.js'] });
 }
-async function start({ tabId, target, serverUrl, streamId, engine = 'browser', apiKey = '', serverToken = '', asrPacks, asrDomain }) {
+async function start({ tabId, target, serverUrl, streamId, engine = 'browser', apiKey = '', serverToken = '',
+  asrPacks, asrDomain, domainMode, pageTitle, contextTurns, vad, localMode, agent, allowRemote }) {
   const packs = JLSASRDomain.normalizePacks(asrPacks ?? asrDomain);
+  const endpoint = engine === 'browser' ? DEFAULT_SERVER : JLSServerURL.checked(serverUrl || DEFAULT_SERVER, allowRemote);
   await restored;
+  const previousTab = state.tabId;
   const ticket = ++generation;
   const sessionId = crypto.randomUUID();
   Object.assign(state, { tabId, running: true, sessionId });
@@ -38,6 +41,10 @@ async function start({ tabId, target, serverUrl, streamId, engine = 'browser', a
   await setStatus({ phase: 'starting', message: '准备中…' }, sessionId);
   try {
     await ensureContentScript(tabId);
+    if (!current()) return { ok: false, error: '采集已取消' };
+    const clear = id => chrome.tabs.sendMessage(id, { type: 'jls:clear' }).catch(() => {});
+    await clear(tabId);
+    if (previousTab && previousTab !== tabId) await clear(previousTab);
     if (!current()) return { ok: false, error: '采集已取消' };
     const saved = await chrome.storage.local.get('jlsCaptionPrefs');
     if (!current()) return { ok: false, error: '采集已取消' };
@@ -48,8 +55,10 @@ async function start({ tabId, target, serverUrl, streamId, engine = 'browser', a
     if (!current()) return { ok: false, error: '采集已取消' };
     const response = await chrome.runtime.sendMessage({
       type: 'jls:offscreen-start', sessionId, streamId, tabId, target,
-      serverUrl: serverUrl || DEFAULT_SERVER, engine, apiKey, serverToken,
-      asrPacks: packs,
+      serverUrl: endpoint, engine, apiKey, serverToken, allowRemote: allowRemote === true,
+      asrPacks: packs, domainMode, pageTitle: domainMode === 'auto' ? String(pageTitle || '').slice(0, 240) : undefined,
+      contextTurns: [1, 3, 4, 5].includes(contextTurns) ? contextTurns : undefined,
+      vad, localMode, agent,
     });
     if (!current()) return { ok: false, error: '采集已取消' };
     if (!response?.ok) throw new Error(response?.error || '采集启动失败');
@@ -138,8 +147,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
       } else {
         if (msg.phase === 'error') chrome.tabs.sendMessage(tabId, { type: 'jls:toast', text: msg.message, bad: true }).catch(() => {});
-        chrome.action.setBadgeText({ text: msg.phase === 'capturing' || msg.phase === 'connected' ? '●' : '' });
-        chrome.action.setBadgeBackgroundColor({ color: '#35d07f' });
+        chrome.action.setBadgeText({ text: ['capturing', 'connected', 'degraded'].includes(msg.phase) ? '●' : '' });
+        chrome.action.setBadgeBackgroundColor({ color: msg.phase === 'degraded' ? '#edb64d' : '#35d07f' });
       }
     }
   })().catch(() => {});

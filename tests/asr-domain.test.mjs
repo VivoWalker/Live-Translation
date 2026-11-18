@@ -5,13 +5,30 @@ import vm from 'node:vm';
 
 const root = new URL('../', import.meta.url);
 const cases = JSON.parse(fs.readFileSync(new URL('tests/fixtures/asr_domain_cases.json', root), 'utf8'));
-const sandbox = vm.createContext({});
+const sandbox = vm.createContext({ URL });
 vm.runInContext(fs.readFileSync(new URL('extension/asr-domain.js', root), 'utf8'), sandbox);
 const create = (...args) => sandbox.JLSASRDomain.create(...args);
 const packs = Object.fromEntries(sandbox.JLSASRDomain.packs.map(id =>
   [id, JSON.parse(fs.readFileSync(new URL(`extension/asr-terms/${id}.json`, root), 'utf8'))]));
 const select = sandbox.JLSASRDomain.loadPacks(packs);
 const data = packs.mashiro;
+
+test('episode metadata selects the most specific pack and audits only trusted aliases', () => {
+  const raw = JSON.parse(fs.readFileSync(new URL('extension/asr-terms/episodes.json', root), 'utf8'));
+  const catalog = sandbox.JLSASRDomain.loadEpisodes(raw);
+  assert.equal(catalog('【学マス】初星学園ＨＲ #10').episode, '初星学園HR');
+  assert.equal(catalog('その他の雑談'), null);
+  raw.episodes[0].terms.push(
+    { canonical: '夏空太郎', aliases: ['なつぞら太郎'], verified: true, source: 'https://example.test/cast' },
+    { canonical: '秋空あき', aliases: ['あきぞらあき'], verified: false },
+  );
+  const episode = sandbox.JLSASRDomain.loadEpisodes(raw)('初星学園HR');
+  const transcript = '夏空太郎、なつぞら太郎とあきぞらあき';
+  const result = select([episode.pack], episode).explain(transcript);
+  assert.equal(result.text, '夏空太郎、夏空太郎とあきぞらあき');
+  assert.equal(result.changes.length, 1);
+  assert.equal(result.changes[0].source, 'https://example.test/cast');
+});
 
 test('domain spelling corrects target livestream vocabulary while preserving ordinary Japanese', () => {
   const corrector = select();
@@ -79,5 +96,5 @@ test('long input and repeated sessions keep correction stateless and bounded', (
   assert.equal(corrector.correct(huge), huge);
   for (let i = 0; i < 2000; i++) assert.equal(corrector.correct('日高真白さん'), '陽高真白さん');
   assert(Object.isFrozen(corrector));
-  assert.deepEqual(Object.keys(corrector).sort(), ['correct', 'profile']);
+  assert.deepEqual(Object.keys(corrector).sort(), ['correct', 'explain', 'profile']);
 });

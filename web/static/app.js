@@ -106,7 +106,9 @@
       };
       ws.onerror = () => fail('无法连接字幕服务');
       ws.onclose = event => {
-        const error = event.code === 1008 ? '服务拒绝连接，请检查访问令牌' : '字幕服务已断开';
+        const error = event.code === 1013 ? '字幕服务积压，请重新开始'
+          : event.code === 1011 ? '字幕服务处理失败，请检查本地模型'
+            : event.code === 1008 ? '服务拒绝连接，请检查访问令牌或请求限制' : '字幕服务已断开';
         fail(error);
         if (isCurrent(session)) stop(session, error, true);
       };
@@ -114,6 +116,8 @@
   }
 
   function handle(session, message) {
+    if (session.pendingConfig && (message.type === 'translation' || message.type === 'translation_cancelled'
+        || message.scope === 'translate')) return;
     switch (message.type) {
       case 'ready':
         $('engine').textContent = message.asr + ' / ' + message.translator;
@@ -152,6 +156,16 @@
       case 'translation_cancelled':
         captions.translationFailed(message.id);
         break;
+      case 'config': {
+        const pending = session.pendingConfig;
+        if (pending && message.ok && (message.request_id ?? pending.id) === pending.id && message.target === pending.target) {
+          session.pendingConfig = null;
+          session.hasCaption = false;
+          captions.clear();
+          updateView();
+        }
+        break;
+      }
     }
   }
 
@@ -163,11 +177,23 @@
     requireCurrent(session);
     const node = session.node = new AudioWorkletNode(ctx, 'pcm-tap', {
       numberOfInputs: 1, numberOfOutputs: 0, channelCount: 1, channelCountMode: 'explicit',
+      processorOptions: { maxPendingBlocks: 20 },
     });
     node.port.onmessage = event => {
       if (!isCurrent(session) || session.ws.readyState !== WebSocket.OPEN) return;
       const samples = event.data;
+      const buffered = session.ws.bufferedAmount + (samples.byteLength || 0);
+      if (samples.overrun || buffered > 128 * 1024) {
+        stop(session, '音频处理积压，请重新开始', true);
+        return;
+      }
+      const congested = buffered > 64 * 1024;
+      if (congested !== session.congested) {
+        session.congested = congested;
+        setStatus(congested ? '音频发送积压' : session.kind === 'file' ? '正在转写样本' : '正在转写', congested ? 'busy' : 'live');
+      }
       session.ws.send(samples);
+      node.port.postMessage('consumed');
       let energy = 0;
       for (let index = 0; index < samples.length; index += 16) energy += samples[index] ** 2;
       const level = Math.min(1, Math.sqrt(energy / Math.max(1, samples.length / 16)) * 7);
@@ -180,11 +206,11 @@
     const token = accessToken.value.trim();
     if (!token) {
       setStatus('需要令牌', 'error');
-      showMessage('请填写服务终端显示的访问令牌', true);
+      showMessage('请填写本地服务访问令牌', true);
       accessToken.focus();
       return;
     }
-    const session = { kind, abort: new AbortController(), hasCaption: false,
+    const session = { kind, abort: new AbortController(), hasCaption: false, congested: false, requestId: 0, pendingConfig: null,
       stageMessage: kind === 'display' ? '选择带音频的标签页' : '加载日语样本' };
     active = session;
     setStatus('准备中', 'busy');
@@ -271,10 +297,9 @@
     try { localStorage.setItem(targetKey, target.value); } catch {}
     updateTarget();
     if (active?.ws?.readyState === WebSocket.OPEN) {
-      active.ws.send(JSON.stringify({ type: 'config', target: target.value }));
-      active.hasCaption = false;
-      captions.clear();
-      updateView();
+      const id = ++active.requestId;
+      active.pendingConfig = { id, target: target.value };
+      active.ws.send(JSON.stringify({ type: 'config', target: target.value, request_id: id }));
     }
   });
   window.addEventListener('pagehide', () => stop());

@@ -17,7 +17,7 @@ import soundfile as sf
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from server.asr import create_recognizer, resample_to_16k  # noqa: E402
+from server.asr import PROVIDERS, create_recognizer, resample_to_16k  # noqa: E402
 from server.asr_domain import PACKS, PROFILES  # noqa: E402
 
 
@@ -25,7 +25,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("files", nargs="+")
     ap.add_argument("--language", default="ja", help="Source language code, or auto")
-    ap.add_argument("--asr", choices=("sensevoice", "whisper"), default="sensevoice")
+    ap.add_argument("--asr", choices=PROVIDERS, default="sensevoice")
+    ap.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    ap.add_argument("--precision")
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--itn", action="store_true", default=True)
     ap.add_argument("--model-dir", default=None)
@@ -38,7 +40,7 @@ def main() -> int:
 
     t0 = time.perf_counter()
     asr = create_recognizer(args.asr, model_dir=args.model_dir, language=args.language, num_threads=args.threads,
-                            asr_domain=selection, asr_terms=args.asr_terms)
+                            asr_domain=selection, asr_terms=args.asr_terms, device=args.device, precision=args.precision)
     print(f"model: {asr.name} ({asr.model_dir})")
     print(f"ASR spelling lexicon: {selection}")
     print(f"init: {time.perf_counter() - t0:.2f}s")

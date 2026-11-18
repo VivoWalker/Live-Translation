@@ -2,6 +2,7 @@
 import asyncio
 import json
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -9,7 +10,9 @@ from unittest.mock import patch
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from server.streaming import StreamSession
+from server.conversation import Glossary
+from server.episodes import EpisodeCatalog
+from server.streaming import SessionConfig, StreamSession
 from server.translate import DeepSeekTranslator, InvalidTranslation, Translation, TranslationPipeline
 from server.translation_cache import LruCache
 
@@ -66,6 +69,37 @@ class TranslationCacheTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.pipe.snapshot()['api_requests'], 1)
         self.assertEqual(len(self.requests), 8)
         self.assertEqual(self.requests[-1]['path'], '/v1/chat/completions')
+
+    async def test_multiturn_context_uses_final_order_and_target_glossary(self):
+        domain = EpisodeCatalog().resolve("auto", title="初星学園HR")
+        cfg = SessionConfig(domain=domain, context_turns=3, glossary=Glossary.load())
+        with patch("server.streaming.SileroVad"):
+            session = StreamSession(None, self.pipe, lambda _: None, cfg)
+        self.addAsyncCleanup(session.close)
+        session.conversation.remember("古い句")
+        for text in ("第一句", "藤田ことね", "第三句"):
+            session.conversation.remember(text)
+        snapshot = session.conversation.snapshot("そうなの？", "zh", 3, cfg.glossary, domain)
+        self.release.clear()
+        first = session._schedule_translation(0, "そうなの？")
+        second = session._schedule_translation(1, "待って")
+        await self.entered.wait()
+        self.release.set()
+        await asyncio.gather(first, second)
+        user = [json.loads(item["payload"]["messages"][1]["content"]) for item in self.requests]
+        self.assertEqual(user[0]["history"], ["第一句", "藤田ことね", "第三句"])
+        self.assertEqual(user[0]["glossary"]["藤田ことね"], "藤田琴音")
+        self.assertEqual(user[0]["episode"], "初星学園HR")
+        self.assertEqual(user[1]["previous"], "そうなの？")
+        self.assertEqual((await session.translator.translate("そうなの？", "zh", snapshot)).source, "cache")
+        version_changed = replace(snapshot, glossary_version="other")
+        self.assertEqual((await session.translator.translate("そうなの？", "zh", version_changed)).source, "api")
+        self.assertEqual(len(self.requests), 3)
+        await session.set_target("en")
+        await session._schedule_translation(2, "藤田ことね")
+        english = json.loads(self.requests[-1]["payload"]["messages"][1]["content"])
+        self.assertEqual(english["history"], [])
+        self.assertEqual(english["glossary"]["藤田ことね"], "Kotone Fujita")
 
     async def test_concurrent_identical_requests_use_one_api_and_one_set_of_usage(self):
         self.release.clear()
@@ -124,6 +158,15 @@ class TranslationCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.pipe.translate('失败后重试', 'zh')).text, '重试成功')
         self.assertEqual(len(self.requests), 5)
         self.assertEqual(self.pipe.snapshot()['api_requests'], 5)
+
+    async def test_oversized_provider_body_is_rejected_without_cache_or_retry(self):
+        self.content = "x" * 70_000
+        with self.assertRaisesRegex(InvalidTranslation, "size limit"):
+            await self.pipe.translate("日文", "zh")
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(self.pipe.snapshot()["cache_entries"], 0)
+        self.content = "译文"
+        self.assertEqual((await self.pipe.translate("日文", "zh")).text, "译文")
 
     async def test_http_retries_are_actual_calls_and_errors_do_not_echo_provider_body(self):
         self.status = 500
@@ -198,33 +241,36 @@ class TranslationCacheTests(unittest.IsolatedAsyncioTestCase):
             second = StreamSession(None, self.pipe, lambda event: None)
         self.addAsyncCleanup(first.close); self.addAsyncCleanup(second.close)
         await first.translator.translate('句X', 'zh', '文脈')
-        first._final_context = '文脈'
-        first._schedule_translation(0, '句X', True); await first._translate_task
-        self.assertEqual(first._final_context, '句X')
+        first.conversation.remember('文脈')
+        await first._schedule_translation(0, '句X')
+        self.assertEqual(first.previous_final_japanese, '句X')
         self.assertEqual(len(self.requests), 1)
-        first._schedule_translation(1, '句Y', True); await first._translate_task
+        await first._schedule_translation(1, '句Y')
         self.assertEqual(json.loads(self.requests[-1]['payload']['messages'][1]['content'])['previous'], '句X')
         await second.translator.translate('句X', 'zh', '文脈')
         self.assertEqual(len(self.requests), 3)
         self.assertEqual(len([event for event in events if event['type'] == 'translation']), 2)
         await first.set_target('en')
-        self.assertEqual(first._final_context, '')
+        self.assertEqual(first.previous_final_japanese, '')
         self.assertEqual(first.translation_stats()['cache_entries'], 0)
         self.assertEqual(second.translation_stats()['api_requests'], 1)
 
-    async def test_superseded_identical_segment_reuses_transport_but_delivers_only_new_id(self):
+    async def test_identical_text_and_context_share_transport_and_deliver_each_segment(self):
         self.release.clear()
         events = []
         with patch('server.streaming.SileroVad'):
             session = StreamSession(None, self.pipe, events.append)
         self.addAsyncCleanup(session.close)
-        session._schedule_translation(0, '同じ句', True)
+        session.conversation.remember('同じ句')
+        first = session._schedule_translation(0, '同じ句')
         await self.entered.wait()
-        session._schedule_translation(1, '同じ句', True)
-        session._schedule_translation(1, '同じ句', True)
-        await asyncio.sleep(.01); self.release.set(); await session._translate_task
+        second = session._schedule_translation(1, '同じ句')
+        self.assertIsNone(session._schedule_translation(1, '同じ句'))
+        await asyncio.sleep(.01)
+        self.release.set()
+        await asyncio.gather(first, second)
         self.assertEqual(len(self.requests), 1)
-        self.assertEqual([event['id'] for event in events if event['type'] == 'translation'], [1])
+        self.assertEqual([event['id'] for event in events if event['type'] == 'translation'], [0, 1])
         self.assertEqual(session.translation_stats()['merged_requests'], 1)
 
     async def test_target_change_clears_context_before_cancellation_can_yield_to_audio_worker(self):
@@ -246,14 +292,15 @@ class TranslationCacheTests(unittest.IsolatedAsyncioTestCase):
             session = StreamSession(None, SimpleNamespace(name='mock', translate=translate), events.append)
         self.addAsyncCleanup(session.close)
         self.addCleanup(release.set)
-        session._final_context = 'old context'
-        session._schedule_translation(0, 'old', True)
+        session.conversation.remember('old context')
+        old = session._schedule_translation(0, 'old')
         await entered.wait()
         changing = asyncio.create_task(session.set_target('en'))
         await cancelling.wait()
-        session._schedule_translation(1, 'new', True)
+        new = session._schedule_translation(1, 'new')
         release.set()
         await changing
-        await session._translate_task
+        await asyncio.gather(old, new)
         self.assertEqual(requests[-1], ('new', 'en', ''))
         self.assertEqual([event['id'] for event in events if event['type'] == 'translation'], [1])
+        self.assertIn({'type': 'translation_cancelled', 'id': 0}, events)

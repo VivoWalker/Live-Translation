@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 PROFILES = ("off", "anime", "gakumas")
@@ -88,17 +90,51 @@ def _read(path: Path, profile: str = "gakumas"):
     return terms, rules
 
 
+@dataclass(frozen=True)
+class EpisodeTerm:
+    canonical: str
+    reading: str
+    category: str
+    priority: str
+    verified: bool
+    source: str
+    aliases: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Correction:
+    alias: str
+    canonical: str
+    start: int
+    end: int
+    source: str
+
+
+@lru_cache(maxsize=len(PACKS))
+def _read_pack(pack):
+    return _read(BUILTIN / f"{pack}.json")
+
+
 class DomainCorrector:
-    def __init__(self, profile: str | list[str] = "gakumas", path: str | Path | None = None):
+    def __init__(self, profile: str | list[str] = "gakumas", path: str | Path | None = None, *,
+                 episode_terms: tuple[EpisodeTerm, ...] = ()):
         if path is not None and profile not in PROFILES:
             raise ValueError("Use either ASR packs or a custom lexicon")
         if path is None:
-            sources = [_read(BUILTIN / f"{pack}.json") for pack in normalize_packs(profile)]
+            sources = [(f"pack:{pack}", *_read_pack(pack)) for pack in normalize_packs(profile)]
         else:
-            sources = [_read(Path(path), profile)]
+            sources = [("custom", *_read(Path(path), profile))]
+        for extra in episode_terms:
+            if extra.verified:
+                sources.append((extra.source, {extra.canonical},
+                                [(alias, extra.canonical, None, False) for alias in extra.aliases]))
 
-        terms = set().union(*(terms for terms, _ in sources))
-        self.rules = sorted((rule for _, rules in sources for rule in rules), key=lambda rule: -len(rule[0]))
+        terms = set().union(*(terms for _, terms, _ in sources))
+        self.rules = sorted((rule for _, _, rules in sources for rule in rules), key=lambda rule: -len(rule[0]))
+        self.origins = {}
+        for source, _, rules in sources:
+            for alias, *_ in rules:
+                self.origins.setdefault(alias, source)
         targets = {}
         for alias, term, _, _ in self.rules:
             if targets.setdefault(alias, term) != term:
@@ -117,9 +153,12 @@ class DomainCorrector:
         return bool(char) and char.isascii() and (char.isalnum() or char == "_")
 
     def correct(self, text: str) -> str:
+        return self.explain(text)[0]
+
+    def explain(self, text: str) -> tuple[str, tuple[Correction, ...]]:
         if not self.rules or len(text) > 8192:
-            return text
-        result, offset = [], 0
+            return text, ()
+        result, changes, offset = [], [], 0
         while offset < len(text):
             protected = next((term for term in self.term_index.get(text[offset], ()) if text.startswith(term, offset)), None)
             match = None
@@ -143,9 +182,12 @@ class DomainCorrector:
                 result.append(protected)
                 offset += len(protected)
             elif match:
-                result.append(match[1])
-                offset += len(match[0])
+                alias, term = match
+                end = offset + len(alias)
+                changes.append(Correction(alias, term, offset, end, self.origins[alias]))
+                result.append(term)
+                offset = end
             else:
                 result.append(text[offset])
                 offset += 1
-        return "".join(result)
+        return "".join(result), tuple(changes)

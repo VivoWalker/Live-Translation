@@ -10,6 +10,7 @@ const deferred = () => { let resolve; const promise = new Promise(r => { resolve
 const extensionId = 'a'.repeat(32);
 const extensionURL = path => `chrome-extension://${extensionId}/${path}`;
 function loadBackground(sandbox) {
+  sandbox.URL = URL;
   sandbox.importScripts = (...files) => { for (const file of files) vm.runInContext(read(file), sandbox); };
   vm.runInContext(read('background.js'), sandbox);
 }
@@ -23,7 +24,7 @@ function media() {
   return { track, getTracks: () => [track], getAudioTracks: () => [track] };
 }
 function offscreen(engine = { init: async () => {}, stop() {}, stats: () => ({}) }) {
-  const requests = [], messages = [], sockets = [];
+  const requests = [], messages = [], sockets = [], nodes = [];
   let listener;
   class Context {
     constructor() { this.state = 'running'; this.audioWorklet = { addModule: async () => {} }; }
@@ -33,20 +34,24 @@ function offscreen(engine = { init: async () => {}, stop() {}, stats: () => ({})
   class Socket {
     constructor() { this.readyState = 1; this.sent = []; sockets.push(this); queueMicrotask(() => this.onopen()); }
     send(raw) {
-      this.sent.push(JSON.parse(raw));
+      this.sent.push(typeof raw === 'string' ? JSON.parse(raw) : raw);
       if (this.sent.length === 2) queueMicrotask(() => this.onmessage({ data: JSON.stringify({ type: 'ready', asr: 'whisper-base-int8', translator: 'mock' }) }));
     }
     close() { this.readyState = 3; }
   }
   const sandbox = vm.createContext({
-    console, DOMException, setTimeout, clearTimeout, setInterval, clearInterval,
-    AudioContext: Context, AudioWorkletNode: class { constructor() { this.port = {}; } disconnect() {} },
+    console, DOMException, URL, setTimeout, clearTimeout, setInterval, clearInterval,
+    AudioContext: Context, AudioWorkletNode: class {
+      constructor() { this.port = { postMessage() {} }; nodes.push(this); }
+      disconnect() {}
+    },
     WebSocket: Socket, JLSEngine: engine,
     navigator: { mediaDevices: { getUserMedia() { const request = deferred(); requests.push(request); return request.promise; } } },
     chrome: { runtime: { id: extensionId, getURL: extensionURL, sendMessage: async m => { messages.push(m); }, onMessage: { addListener(fn) { listener = fn; } } } },
   });
+  vm.runInContext(read('service-url.js'), sandbox);
   vm.runInContext(read('offscreen.js'), sandbox);
-  return { requests, messages, sockets, send: message => dispatch(listener, message) };
+  return { requests, messages, sockets, nodes, send: message => dispatch(listener, message) };
 }
 
 test('late media is stopped after cancellation and cannot restart capture', async () => {
@@ -106,6 +111,70 @@ test('server mode authenticates and never starts the browser engine', async () =
   await context.send({ type: 'jls:offscreen-stop', sessionId: 'S' });
 });
 
+test('remote capture requires explicit consent and secure WebSocket before opening media', async () => {
+  const context = offscreen();
+  for (const [url, allowRemote] of [['wss://remote.test/ws', false], ['ws://remote.test/ws', true],
+    ['wss://user:pass@remote.test/ws', true], ['wss://remote.test/ws?token=secret', true]]) {
+    const result = await context.send({ type: 'jls:offscreen-start', sessionId: 'R', engine: 'server', serverUrl: url, allowRemote });
+    assert.equal(result.ok, false);
+    assert.equal(context.requests.length, 0);
+    assert.equal(context.sockets.length, 0);
+  }
+  const start = context.send({ type: 'jls:offscreen-start', sessionId: 'R', engine: 'server',
+    serverUrl: 'wss://remote.test/ws', allowRemote: true });
+  await tick();
+  context.requests[0].resolve(media());
+  assert.equal((await start).ok, true);
+  assert.equal(context.sockets.length, 1);
+  await context.send({ type: 'jls:offscreen-stop', sessionId: 'R' });
+});
+
+test('server capture reports buffered audio and stops at the hard byte limit', async () => {
+  const context = offscreen();
+  const started = context.send({ type: 'jls:offscreen-start', sessionId: 'S', engine: 'server' });
+  await tick();
+  const stream = media();
+  context.requests[0].resolve(stream);
+  assert.equal((await started).ok, true);
+  const socket = context.sockets[0], node = context.nodes[0];
+  socket.bufferedAmount = 70 * 1024;
+  node.port.onmessage({ data: new Float32Array(1600) });
+  assert.equal(context.messages.at(-1).phase, 'degraded');
+  assert.equal(socket.sent.length, 3);
+  socket.bufferedAmount = 128 * 1024;
+  node.port.onmessage({ data: new Float32Array(1600) });
+  assert.equal(context.messages.at(-1).phase, 'error');
+  assert.equal(socket.sent.length, 3);
+  assert.equal(stream.track.stopped, true);
+});
+
+test('enhanced capture sends opted-in context and Agent configuration to the service', async () => {
+  const context = offscreen();
+  const start = context.send({ type: 'jls:offscreen-start', sessionId: 'E', engine: 'server-enhanced',
+    localMode: 'enhanced', agent: true, domainMode: 'auto', pageTitle: '初星学園HR', contextTurns: 3 });
+  await tick();
+  context.requests[0].resolve(media());
+  assert.equal((await start).ok, true);
+  assert.deepEqual(context.sockets[0].sent[1], { type: 'config', target: 'zh', domain: 'auto',
+    page_title: '初星学園HR', context_turns: 3, mode: 'enhanced', agent: true });
+  assert.match(context.messages.find(m => m.phase === 'capturing').message, /未启用 Agent/);
+  await context.send({ type: 'jls:offscreen-stop', sessionId: 'E' });
+});
+
+test('worklet credit bounds unconsumed blocks and signals overrun once', () => {
+  const sent = [];
+  let processor;
+  vm.runInNewContext(read('pcm-worklet.js'), {
+    AudioWorkletProcessor: class { port = { postMessage(value) { sent.push(value); } }; },
+    registerProcessor(name, factory) { processor = new factory({ processorOptions: { maxPendingBlocks: 2 } }); },
+  });
+  const block = [[new Float32Array(1600)]];
+  processor.process(block);
+  processor.port.onmessage({ data: 'consumed' });
+  for (let i = 0; i < 4; i++) processor.process(block);
+  assert.deepEqual(sent.map(value => value.overrun || value.length), [1600, 1600, 1600, true]);
+});
+
 test('stop during engine initialization stops media and suppresses late progress', async () => {
   const initialization = deferred();
   let handler;
@@ -124,7 +193,7 @@ test('stop during engine initialization stops media and suppresses late progress
 });
 
 function engine({ runtimeReady = true, runtimeFailure = false, setupFailure = false, decodeFailure = false, cache, fetcher, domainFetcher, cryptoImpl = webcrypto, clock, requestTimeoutMs } = {}) {
-  let speech = true, moduleReady;
+  let speech = true, moduleReady, pendingSegment = false;
   let hypothesis = 'PRIVATE_TAB_A';
   let vadSegment = { samples: new Float32Array(9600), start: 0 };
   const decodedAudio = [];
@@ -135,7 +204,7 @@ function engine({ runtimeReady = true, runtimeFailure = false, setupFailure = fa
   const sandbox = vm.createContext({
     console, crypto: cryptoImpl, performance,
     Date: clock ? class extends Date { static now() { return clock.now; } } : Date,
-    Float32Array, Uint8Array, Blob, URL, Response, TextEncoder,
+    Float32Array, Uint8Array, Blob, URL, Response, TextEncoder, TextDecoder,
     DOMException, AbortController,
     setTimeout: (fn, delay) => setTimeout(fn, delay === 12000 && requestTimeoutMs !== undefined ? requestTimeoutMs : delay), clearTimeout,
     navigator: { storage: { persist: async () => true } },
@@ -148,7 +217,8 @@ function engine({ runtimeReady = true, runtimeFailure = false, setupFailure = fa
       requests.push({ ...request, url, options });
       return request.promise;
     },
-    createVad: () => ({ free() {}, acceptWaveform() {}, isDetected: () => speech, isEmpty: () => false, front: () => vadSegment, pop() {} }),
+    createVad: () => ({ free() {}, acceptWaveform() {}, isDetected: () => speech, isEmpty: () => !pendingSegment,
+      front: () => vadSegment, pop() { pendingSegment = false; } }),
     OfflineRecognizer: class {
       constructor(config) {
         recognizerConfig = config;
@@ -185,8 +255,8 @@ function engine({ runtimeReady = true, runtimeFailure = false, setupFailure = fa
     hypothesis(text) { hypothesis = text; },
     vadSegment(samples, start = 0) { vadSegment = { samples, start }; },
     speech(seconds) { speech = true; for (let i = 0; i < Math.round(seconds * 10); i++) sandbox.JLSEngine.feed(new Float32Array(1600)); },
-    endSpeech() { speech = false; sandbox.JLSEngine.feed(new Float32Array(1600)); },
-    utterance() { vadSegment = { samples: new Float32Array(9600), start: Math.round(sandbox.JLSEngine.stats().audio_seconds * 16000) }; speech = true; for (let i = 0; i < 6; i++) sandbox.JLSEngine.feed(new Float32Array(1600)); speech = false; sandbox.JLSEngine.feed(new Float32Array(1600)); },
+    endSpeech() { speech = false; pendingSegment = true; sandbox.JLSEngine.feed(new Float32Array(1600)); },
+    utterance() { vadSegment = { samples: new Float32Array(9600), start: Math.round(sandbox.JLSEngine.stats().audio_seconds * 16000) }; speech = true; for (let i = 0; i < 6; i++) sandbox.JLSEngine.feed(new Float32Array(1600)); this.endSpeech(); },
   };
 }
 
@@ -542,9 +612,14 @@ test('browser-mode popup starts without fetching a local service', async () => {
   element('asr-pack-mashiro').checked = true;
   element('asr-domain-field').change();
   assert.deepEqual(Array.from(saved.jlsAsrPacks), ['mashiro']);
+  element('domain-mode').value = 'auto';
+  element('domain-mode').change();
+  element('context-turns').value = '3';
   await element('start').click();
   assert.equal(calls, 0);
   assert.equal(sent.find(m => m.type === 'jls:start').engine, 'browser');
+  assert.equal(sent.find(m => m.type === 'jls:start').pageTitle, 'test');
+  assert.equal(sent.find(m => m.type === 'jls:start').contextTurns, 3);
   assert.deepEqual(Array.from(sent.find(m => m.type === 'jls:start').asrPacks), ['mashiro']);
 });
 
@@ -626,14 +701,16 @@ test('browser reuse respects context and a cache hit advances context for the ne
 test('browser concurrent identical requests share one API result and emit once per distinct segment', async () => {
   const context = engine(); await context.api.init(context.config);
   try {
-    context.hypothesis('同じ句'); context.utterance(); context.utterance();
-    await tick(); assert.equal(context.requests.length, 1);
+    context.hypothesis('同じ句'); context.utterance(); context.utterance(); context.utterance();
+    await tick(); assert.equal(context.requests.length, 2);
+    context.requests[1].resolve(successfulReply()); await tick();
     context.requests[0].resolve(successfulReply()); await tick();
     const events = context.events.filter(e => e.type === 'translation');
-    assert.equal(events.length, 2); assert.equal(new Set(events.map(e => e.id)).size, 2);
+    assert.deepEqual(events.slice(0, 2).map(e => e.id).sort(), [1, 2]);
+    assert.equal(events[2].id, 0);
     const stats = context.api.stats().translation;
-    assert.equal(stats.api_requests, 1); assert.equal(stats.merged_requests, 1);
-    assert.equal(stats.completion_tokens, 5); assert.equal(stats.in_flight, 0);
+    assert.equal(stats.api_requests, 2); assert.equal(stats.merged_requests, 1);
+    assert.equal(stats.completion_tokens, 10); assert.equal(stats.in_flight, 0);
     assert.equal(stats.deliveries_in_flight, 0);
   } finally { context.api.stop(); }
 });
@@ -660,7 +737,7 @@ test('browser incomplete and failed responses are not cached and can be retried'
   const context = engine(); await context.api.init(context.config);
   try {
     for (const response of [
-      { ok: false, status: 500 },
+      { ok: false, status: 400 },
       { ok: true, json: async () => ({ choices: [{ finish_reason: 'length', message: { content: '截断的输出' } }] }) },
       { ok: true, json: async () => ({ choices: [{ message: { content: '缺失结束标记' } }] }) },
       successfulReply('  '), successfulReply('“”'),
@@ -673,6 +750,38 @@ test('browser incomplete and failed responses are not cached and can be retried'
     await translatedUtterance(context, '同じ句');
     assert.equal(context.requests.length, 6);
     assert.equal(context.events.filter(e => e.type === 'translation').length, 1);
+  } finally { context.api.stop(); }
+});
+
+test('browser freezes context before asynchronous completion and bounds the queue', async () => {
+  const context = engine(); await context.api.init(context.config);
+  try {
+    for (let i = 0; i < 35; i++) { context.hypothesis('台詞' + i); context.utterance(); }
+    await tick();
+    const user = request => JSON.parse(JSON.parse(request.options.body).messages[1].content);
+    assert.deepEqual(context.requests.map(user), [
+      { previous: '', current: '台詞0' }, { previous: '台詞0', current: '台詞1' },
+      { previous: '台詞1', current: '台詞2' },
+    ]);
+    assert.equal(context.api.stats().translation.deliveries_in_flight, 32);
+    assert.deepEqual(context.events.filter(e => e.code === 'translation_overflow').map(e => e.id), [32, 33, 34]);
+    assert.equal(context.events.filter(e => e.type === 'final').length, 35);
+    context.requests[1].resolve(successfulReply()); await tick();
+    assert.deepEqual(user(context.requests[3]), { previous: '台詞2', current: '台詞3' });
+    assert.equal(context.events.find(e => e.type === 'translation').id, 1);
+  } finally { context.api.stop(); }
+});
+
+test('browser retries a transient provider error once for the same segment', async () => {
+  let attempts = 0;
+  const context = engine({ fetcher: async () => ++attempts === 1 ? { ok: false, status: 503 } : successfulReply() });
+  await context.api.init(context.config);
+  try {
+    context.utterance();
+    await new Promise(resolve => setTimeout(resolve, 310));
+    assert.equal(attempts, 2);
+    assert.deepEqual(context.events.filter(e => e.type === 'translation').map(e => e.id), [0]);
+    assert.equal(context.api.stats().translation.api_requests, 2);
   } finally { context.api.stop(); }
 });
 
@@ -768,6 +877,21 @@ test('browser failures and usage statistics never echo dialogue, provider bodies
   } finally { context.api.stop(); }
 });
 
+test('browser bounds streaming provider responses and then accepts a later valid reply', async () => {
+  let calls = 0;
+  const context = engine({ fetcher: async () => ++calls === 1
+    ? new Response('x'.repeat(70000))
+    : Response.json(await successfulReply().json()) });
+  await context.api.init(context.config);
+  try {
+    context.utterance(); await tick();
+    assert.equal(context.api.stats().translation.cache_entries, 0);
+    assert.equal(context.events.find(e => e.type === 'error').id, 0);
+    context.utterance(); await tick();
+    assert.equal(context.events.find(e => e.type === 'translation').id, 1);
+  } finally { context.api.stop(); }
+});
+
 test('browser Japanese decoding and domain correction reach both preview and final translation', async () => {
   const clock = { now: 10000 }, context = engine({ clock });
   await context.api.init(context.config);
@@ -802,6 +926,38 @@ test('changing ASR domain cancels old translation and starts with clean context 
     await context.api.init({ ...context.config, asrPacks: ['mashiro'] });
     await translatedUtterance(context, '日高真白さんと秦谷みすず');
     assert.equal(context.events.filter(event => event.type === 'final').at(-1).text, '陽高真白さんと秦谷みすず');
+  } finally { context.api.stop(); }
+});
+
+test('browser opt-in translation history is bounded and uses a separate target glossary', async () => {
+  const context = engine();
+  await context.api.init({ ...context.config, contextTurns: 3, domainMode: 'auto', pageTitle: '初星学園HR' });
+  try {
+    for (const text of ['古い句', '第一句', '藤田ことね', '第三句', 'そうなの？']) await translatedUtterance(context, text);
+    const user = request => JSON.parse(JSON.parse(request.options.body).messages[1].content);
+    const chinese = user(context.requests.at(-1));
+    assert.deepEqual(chinese.history, ['第一句', '藤田ことね', '第三句']);
+    assert.equal(chinese.glossary['藤田ことね'], '藤田琴音');
+    assert.equal(chinese.episode, '初星学園HR');
+    context.api.setConfig({ target: 'en' });
+    await translatedUtterance(context, '藤田ことね');
+    const english = user(context.requests.at(-1));
+    assert.deepEqual(english.history, []);
+    assert.equal(english.glossary['藤田ことね'], 'Kotone Fujita');
+    assert.equal(context.events.filter(e => e.type === 'final').at(-1).text, '藤田ことね');
+  } finally { context.api.stop(); }
+});
+
+test('browser auto domain filters unrelated packs and a fresh session restores manual mode', async () => {
+  const context = engine();
+  await context.api.init({ ...context.config, domainMode: 'auto', pageTitle: '初星学園ＨＲ' });
+  try {
+    await translatedUtterance(context, '日高真白さんと藤田琴音');
+    assert.equal(context.events.find(e => e.type === 'final').text, '日高真白さんと藤田ことね');
+    assert.equal(context.api.stats().domain.episode, '初星学園HR');
+    await context.api.init(context.config);
+    await translatedUtterance(context, '日高真白さん');
+    assert.equal(context.events.filter(e => e.type === 'final').at(-1).text, '陽高真白さん');
   } finally { context.api.stop(); }
 });
 

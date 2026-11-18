@@ -1,0 +1,3 @@
+nemo_toolkit[asr]==2.5.3
+# NeMo 2.5.x uses NumPy 1.x. Keep an Arrow wheel compatible with it.
+pyarrow==23.0.1

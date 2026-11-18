@@ -2,7 +2,7 @@
 
 [返回项目首页](../README.md)
 
-本地服务使用 Python、sherpa-onnx 与 ONNX Runtime 在 CPU 上识别日语，默认 SenseVoice，可切换实验性 Whisper。扩展选择「本地服务」后，将标签页音频发送到配置的 WebSocket 地址；默认服务只监听本机。
+本地服务默认使用 Python、sherpa-onnx 和 CPU SenseVoice。扩展选择本地服务模式后，将标签页音频发送到配置的 WebSocket 地址，服务默认只监听本机。
 
 ## 安装依赖
 
@@ -88,11 +88,11 @@ python -m server.app --threads 2
 
 服务启动后：
 
-1. 在终端找到本地服务访问令牌。
-2. 扩展中选择「本地服务」，地址使用 `ws://127.0.0.1:8765/ws`，填写访问令牌并开始字幕。
+1. 从服务终端提示的文件路径读取本机访问令牌。默认文件为 `out/access-token`。
+2. 在扩展选择「本地快速」或「本地增强」，使用 `ws://127.0.0.1:8765/ws` 并填写令牌。
 3. 也可直接打开 `http://127.0.0.1:8765/` 使用演示页，选择要共享的音源。
 
-默认随机令牌在服务重启后变化。需要固定时，使用 `JLSUBS_ACCESS_TOKEN` 或配置 `access_token`，至少 32 个随机 ASCII 字符。令牌通过第一条 WebSocket 消息发送，不放在 URL 查询参数中。
+服务首次运行生成本地令牌文件，后续启动复用。可用 `--token-file` 指定文件。已有 `JLSUBS_ACCESS_TOKEN` 或 `access_token` 配置仍优先，并应包含 32–128 个可打印随机 ASCII 字符。令牌通过第一条 WebSocket 消息发送。
 
 ## 配置
 
@@ -107,12 +107,13 @@ python -m server.app --threads 2
 | DeepSeek Key | `deepseek_api_key` / `DEEPSEEK_API_KEY` | 用户提供 |
 | DeepSeek 模型 | `DEEPSEEK_MODEL` | `deepseek-chat` |
 | DeepSeek 地址 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` |
+| DeepSeek 环境代理 | `DEEPSEEK_TRUST_ENV=1` | 关闭 |
 | 监听地址 | `host` / `--host` | `127.0.0.1` |
 | 端口 | `port` / `--port` | `8765` |
 
-`auto` 在配置 Key 时使用 DeepSeek，否则使用公共 Google 翻译端点，仅供本地试用；`mock` 用于离线检查流程。显式选择 `deepseek` 时必须提供 Key。译文语言由扩展或演示页选择，支持简体中文与英文。
+`auto` 有 Key 时启用 DeepSeek，缺少 Key 时输出日语字幕。可显式选择 `google-public` 使用公共翻译端点，或使用 `mock` 进行离线链路检查。译文语言由扩展或演示页选择，支持简体中文与英文。
 
-服务默认校验本机 Host、同源网页和扩展来源，所有 WebSocket 客户端均需认证。额外受信 HTTP 主机名使用 `--allow-host example.com`；远程部署需配合 HTTPS 与相应网络访问控制。开发测试页只在 `--dev-assets` 下公开，`config.local.json` 与 `key.local.js` 不通过静态路由提供。
+服务默认校验本机 Host、同源网页和扩展来源，所有 WebSocket 客户端均需认证。额外受信 HTTP 主机名使用 `--allow-host example.com`。远程部署使用 HTTPS 反向代理与网络访问控制，扩展要求 `wss://` 并在高级设置显式允许发送音频。开发测试页只在 `--dev-assets` 下提供，本地凭据和审核数据库留在本机文件系统。
 
 ## 用同一音频比较模型
 
@@ -124,3 +125,36 @@ python tools/test_asr.py testdata/ja_nanami.mp3 --asr whisper --threads 2
 ```
 
 Whisper 的预览至少等待 2 秒语音，间隔至少 2 秒；解码慢时进一步降低预览频率。最终字幕仍由句尾分段触发，较慢的 CPU 或多个音源可能产生积压。
+
+## 语音分段参数
+
+`--vad-min-silence`、`--vad-max-segment` 和 `--vad-overlap` 的单位均为秒，对应配置字段 `vad_min_silence`、`vad_max_segment`、`vad_overlap`。默认分别为 0.4、12、0。可在同一批音频上比较 0.4 / 0.6 / 0.8 秒停顿和 8 / 12 / 16 秒上限。重叠为可选实验，允许 0–0.3 秒，在强制切分后的下一段复用少量边界音频，移除双方一致的短前后缀。真实重复的台词可能受影响，使用默认配置可关闭此行为。
+
+## 可选识别后端
+
+扩展的本地快速与本地增强都连接操作方启动的服务。SenseVoice、Whisper Base 和 Parakeet 可作为快速模式的后端，Whisper Turbo 和 Qwen3-ASR 作为增强后端。弹窗显示本次连接的实际模型或回退状态。高级设置可选择是否请求 Agent 和多轮翻译，服务通过 `--agent` 提供复查能力。
+
+使用官方模型或已核验来源的转换制品，将权重预先下载到本机目录。安装所选后端的依赖后再启动服务。下例仅说明配置，CUDA 需按上游说明安装对应的运行时。
+
+```sh
+python -m pip install -r requirements/parakeet.txt
+python -m server.app --asr parakeet --model-dir /path/to/parakeet.nemo --asr-device cpu
+
+python -m pip install -r requirements/whisper-turbo.txt
+python -m server.app --asr whisper-turbo --model-dir /path/to/ct2-turbo --asr-device cuda --asr-precision float16
+
+python -m pip install -r requirements/qwen3-asr.txt
+python -m server.app --asr qwen3-asr --model-dir /path/to/Qwen3-ASR-1.7B --asr-device cuda --asr-precision bfloat16
+```
+
+`--asr-fallback sensevoice` 默认在备用后端加载失败时尝试 CPU SenseVoice。识别模型目录可用 `--fallback-model-dir` 指定。设置 `--asr-fallback off` 后可严格测试某个后端。服务报告实际模型和回退来源。常规运行仅加载一套 ASR。模型与制品来源见 [模型对照](model-comparison.md)。
+
+## 录播说话人分离
+
+可在独立虚拟环境中安装 `requirements.txt` 和 `requirements/diarization.txt`。在 Hugging Face 接受 Community-1 条款并取得完整模型目录后，使用本地音频运行。
+
+```sh
+python -m server.diarization recording.wav --model-dir /path/to/community-1 --output speakers.json
+```
+
+在输出中，同一时间区间可以有多个匿名 `SPEAKER_00` 类标签。可通过 `--captions` 输入带 `start`、`end` 的 JSON 字幕数组。任务适用于最多一小时的录播，识别与处理在本地执行。默认扩展和 WebSocket 实时路径无需加载说话人模型。 [Community-1 权重与条款](https://huggingface.co/pyannote/speaker-diarization-community-1)

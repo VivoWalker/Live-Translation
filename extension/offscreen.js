@@ -2,6 +2,7 @@
 'use strict';
 let active = null;
 let generation = 0;
+const SOCKET_WARN_BYTES = 64 * 1024, SOCKET_LIMIT_BYTES = 128 * 1024;
 const current = capture => active === capture && !capture.cancelled;
 function report(capture, phase, message) {
   if (current(capture)) chrome.runtime.sendMessage({ type: 'jls:state', sessionId: capture.sessionId, phase, message }).catch(() => {});
@@ -11,6 +12,11 @@ function send(capture, event) {
 }
 function check(capture) {
   if (!current(capture)) throw new DOMException('采集已取消', 'AbortError');
+}
+function failCapture(capture, message) {
+  if (!current(capture)) return;
+  report(capture, 'error', message);
+  stopInternal(capture.sessionId);
 }
 async function dispose(capture) {
   if (!capture || capture.cancelled) return;
@@ -35,7 +41,7 @@ async function stopInternal(sessionId) {
   active = null;
   await dispose(old);
 }
-function connect(capture, url, target, token) {
+function connect(capture, url, target, token, settings) {
   return new Promise((resolve, reject) => {
     const sock = capture.ws = new WebSocket(url);
     sock.binaryType = 'arraybuffer';
@@ -48,7 +54,7 @@ function connect(capture, url, target, token) {
     sock.onopen = () => {
       if (!current(capture)) return sock.close();
       sock.send(JSON.stringify({ type: 'auth', token }));
-      sock.send(JSON.stringify({ type: 'config', target }));
+      sock.send(JSON.stringify({ type: 'config', target, ...settings }));
     };
     sock.onmessage = e => {
       if (!current(capture)) return;
@@ -56,24 +62,33 @@ function connect(capture, url, target, token) {
       try { msg = JSON.parse(e.data); } catch { return; }
       if (msg.type === 'ready' && !settled) {
         settled = true; clearTimeout(timer);
+        const name = String(msg.asr || '').slice(0, 80);
+        const modeMismatch = settings.mode && msg.asr_mode && settings.mode !== msg.asr_mode;
+        const defaultMessage = name ? '本地识别模型 ' + name : '';
+        capture.notice = msg.asr_fallback_from ? '服务已回退到 ' + name
+          : modeMismatch ? (msg.asr_mode === 'fast' ? '服务当前提供本地快速模式' : '服务当前提供本地增强模式') + '（' + name + '）'
+            : defaultMessage;
+        if (settings.agent && !msg.agent?.enabled) capture.notice += '。服务未启用 Agent 复查';
         report(capture, 'connected', '已连接字幕服务（' + msg.asr + ' / ' + msg.translator + '）');
         resolve();
       }
+      if (msg.type === 'stats') msg.client_buffered_bytes = sock.bufferedAmount || 0;
       send(capture, msg);
     };
     sock.onerror = () => fail(new Error('无法连接字幕服务'));
-    sock.onclose = () => {
-      fail(new Error('字幕服务连接已关闭，请检查访问令牌'));
-      if (current(capture)) {
-        report(capture, 'error', '字幕服务已断开，请检查访问令牌');
-        stopInternal(capture.sessionId);
-      }
+    sock.onclose = event => {
+      const message = event?.code === 1013 ? '字幕服务积压，请重新开始字幕'
+        : event?.code === 1011 ? '字幕服务处理失败，请检查本地模型'
+          : event?.code === 1008 ? '字幕服务拒绝连接，请检查访问令牌或请求限制' : '字幕服务已断开';
+      fail(new Error(message));
+      failCapture(capture, message);
     };
   });
 }
 async function start(msg) {
   const old = active;
   const capture = { id: ++generation, sessionId: msg.sessionId, cancelled: false, engineStarted: false };
+  const local = msg.engine === 'server' || msg.engine === 'server-enhanced';
   capture.cancelledPromise = new Promise((_, reject) => {
     capture.cancelStart = () => reject(new DOMException('采集已取消', 'AbortError'));
   });
@@ -83,6 +98,7 @@ async function start(msg) {
   await dispose(old);
   check(capture);
   try {
+    const endpoint = local ? JLSServerURL.checked(msg.serverUrl || 'ws://127.0.0.1:8765/ws', msg.allowRemote) : null;
     const media = navigator.mediaDevices.getUserMedia({
       audio: { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: msg.streamId } }, video: false,
     });
@@ -106,28 +122,57 @@ async function start(msg) {
     await capture.ctx.audioWorklet.addModule(chrome.runtime.getURL('pcm-worklet.js')); check(capture);
     if (capture.ctx.state === 'suspended') { await capture.ctx.resume(); check(capture); }
     capture.source = capture.ctx.createMediaStreamSource(capture.stream);
-    capture.node = new AudioWorkletNode(capture.ctx, 'pcm-tap', { numberOfInputs: 1, numberOfOutputs: 0, channelCount: 1, channelCountMode: 'explicit' });
-    capture.source.connect(capture.node);
-    if (msg.engine === 'server') {
-      await connect(capture, msg.serverUrl || 'ws://127.0.0.1:8765/ws', msg.target || 'zh', msg.serverToken || '');
+    capture.node = new AudioWorkletNode(capture.ctx, 'pcm-tap', { numberOfInputs: 1, numberOfOutputs: 0,
+      channelCount: 1, channelCountMode: 'explicit', processorOptions: { maxPendingBlocks: 20 } });
+    if (local) {
+      const settings = msg.domainMode === 'auto' ? { domain: 'auto', page_title: msg.pageTitle }
+        : msg.domainMode === 'off' ? { domain: 'off' } : {};
+      if (msg.contextTurns !== undefined) settings.context_turns = msg.contextTurns;
+      if (msg.localMode !== undefined) settings.mode = msg.localMode;
+      if (typeof msg.agent === 'boolean') settings.agent = msg.agent;
+      await connect(capture, endpoint, msg.target || 'zh', msg.serverToken || '', settings);
       check(capture);
-      capture.node.port.onmessage = e => {
-        if (current(capture) && capture.ws?.readyState === 1) capture.ws.send(e.data);
-      };
     } else {
       capture.engineStarted = true;
       await Promise.race([JLSEngine.init({ target: msg.target || 'zh', apiKey: msg.apiKey || '', asrPacks: msg.asrPacks ?? msg.asrDomain, onEvent: event => {
         if (!current(capture)) return;
         if (event.type === 'progress') report(capture, 'starting', event.message);
         else send(capture, event);
-      } }), capture.cancelledPromise]);
+      }, domainMode: msg.domainMode, pageTitle: msg.pageTitle, contextTurns: msg.contextTurns, vad: msg.vad }), capture.cancelledPromise]);
       check(capture);
-      capture.node.port.onmessage = e => { if (current(capture)) JLSEngine.feed(e.data); };
     }
-    report(capture, 'capturing', '正在接收页面声音');
+    const audioStart = capture.ctx.currentTime;
+    let audioSeconds = 0, congested = false;
+    capture.node.port.onmessage = ({ data }) => {
+      if (!current(capture)) return;
+      if (data.overrun) { failCapture(capture, '音频处理积压，请重新开始字幕'); return; }
+      try {
+        if (capture.ws?.readyState === 1) {
+          const buffered = (capture.ws.bufferedAmount || 0) + data.byteLength;
+          if (buffered > SOCKET_LIMIT_BYTES) {
+            failCapture(capture, '音频发送缓冲区已满，请检查本地服务并重新开始字幕');
+            return;
+          }
+          const warning = buffered > SOCKET_WARN_BYTES;
+          if (warning !== congested) {
+            congested = warning;
+            report(capture, warning ? 'degraded' : 'capturing', warning ? '音频发送积压' : capture.notice);
+          }
+          capture.ws.send(data);
+        } else if (capture.engineStarted) {
+          audioSeconds += data.length / 16000;
+          JLSEngine.feed(data, capture.ctx.currentTime - audioStart - audioSeconds > .3);
+        }
+        capture.node.port.postMessage('consumed');
+      } catch {
+        failCapture(capture, '音频处理失败，请重新开始字幕');
+      }
+    };
+    capture.source.connect(capture.node);
+    report(capture, 'capturing', capture.notice || '');
     capture.statsTimer = setInterval(() => {
       if (!current(capture)) return;
-      if (msg.engine === 'server' && capture.ws?.readyState === 1) capture.ws.send(JSON.stringify({ type: 'stats' }));
+      if (local && capture.ws?.readyState === 1) capture.ws.send(JSON.stringify({ type: 'stats' }));
       else if (capture.engineStarted) send(capture, JLSEngine.stats());
     }, 3000);
     capture.stream.getAudioTracks()[0].addEventListener('ended', () => {
