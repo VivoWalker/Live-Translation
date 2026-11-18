@@ -23,7 +23,7 @@
     theme: { system: '跟随系统', light: '浅色', dark: '深色' },
   };
   const colors = { color: '#f3f6ff', sourceColor: '#dcebe3', backgroundColor: '#101f1b' };
-  const switches = { showJa: true, shadow: true, pauseOnHover: true, animations: true };
+  const switches = { showJa: true, shadow: true, blur: true, pauseOnHover: true, animations: true };
   const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
   const defaults = {
     ...Object.fromEntries(Object.entries(ranges).map(([key, range]) => [key, range[3]])),
@@ -65,7 +65,7 @@
   }
 
   const appearanceKeys = ['fontSize', 'sourceSize', 'lineHeight', 'outline', 'width', 'background',
-    'focusBackground', 'radius', 'font', 'align', 'order', 'color', 'sourceColor', 'backgroundColor', 'shadow'];
+    'focusBackground', 'radius', 'font', 'align', 'order', 'color', 'sourceColor', 'backgroundColor', 'shadow', 'blur'];
   const standard = Object.fromEntries(appearanceKeys.map(key => [key, defaults[key]]));
   const presets = {
     standard: { label: '均衡', values: standard },
@@ -90,6 +90,8 @@
       '--caption-width': prefs.width + '%',
       '--rest-bg': prefs.background / 100,
       '--focus-bg': prefs.focusBackground / 100,
+      '--caption-blur': prefs.blur ? 'blur(2px)' : 'none',
+      '--caption-focus-blur': prefs.blur ? 'blur(18px)' : 'none',
       '--caption-bg': prefs.backgroundColor.match(/[\da-f]{2}/g).map(pair => parseInt(pair, 16)).join(','),
       '--caption-color': prefs.color,
       '--source-color': prefs.sourceColor,
@@ -136,6 +138,7 @@
       ['backgroundColor', '底板颜色'], ['anchor', '字幕位置'],
       ['background', '平时不透明度'], ['focusBackground', '悬停不透明度'],
       ['width', '字幕宽度'], ['radius', '圆角'],
+      ['blur', '背景模糊', true],
       ['theme', '界面主题', true],
     ] },
     { id: 'reading', label: '阅读', fields: [
@@ -159,7 +162,7 @@
         ${key === 'anchor' ? '<option value="custom" disabled>已拖动定位</option>' : ''}</select></label>`;
     }
     const color = Object.hasOwn(colors, key);
-    return `<label class="setting control-inline"><span>${label}</span><input ${data} type="${color ? 'color' : 'checkbox'}" ${color ? '' : 'role="switch"'}></label>`;
+    return `<label class="setting control-inline${wide ? ' wide' : ''}"><span>${label}</span><input ${data} type="${color ? 'color' : 'checkbox'}" ${color ? '' : 'role="switch"'}></label>`;
   }
 
   const editorCSS = `
@@ -228,9 +231,11 @@
     .caption-preview[data-anchor="middle"] { justify-content: center; }
     .caption-preview .caption-appearance {
       width: var(--caption-width); padding: 7px 12px; border-radius: var(--caption-radius);
-      background: rgba(var(--caption-bg), var(--rest-bg));
+      background: rgba(var(--caption-bg), var(--rest-bg)); backdrop-filter: var(--caption-blur);
     }
-    .caption-preview .caption-appearance:hover { background: rgba(var(--caption-bg), var(--focus-bg)); }
+    .caption-preview .caption-appearance:hover {
+      background: rgba(var(--caption-bg), var(--focus-bg)); backdrop-filter: var(--caption-focus-blur);
+    }
     .caption-preview .caption-appearance.positioned {
       position: absolute; left: var(--preview-x); top: var(--preview-y);
       transform: translate(calc(-1 * var(--preview-x)), calc(-1 * var(--preview-y)));

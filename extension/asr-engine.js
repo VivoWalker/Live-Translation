@@ -218,6 +218,7 @@
   let started = false;
   let generation = 0;
   let runtimePromise = null;
+  let modelLoad = null;
   const scripts = new Map();
   const pendingRequests = new Set();
   const timers = new Set();
@@ -298,30 +299,56 @@
     return buffer;
   }
 
-  async function fetchModel(url) {
+  async function fetchModel(url, signal) {
+    signal.throwIfAborted();
     const controller = new AbortController();
+    const cancel = () => controller.abort(signal.reason);
+    signal.addEventListener('abort', cancel, { once: true });
     const timer = setTimeout(() => controller.abort(), 300000);
     try {
       const response = await fetch(url, { signal: controller.signal });
       if (!response.ok) throw new Error('模型下载失败 HTTP ' + response.status);
       return await response.arrayBuffer();
-    } finally { clearTimeout(timer); }
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', cancel);
+    }
   }
 
-  async function buildPackage(progress) {
+  function unpack(buffer, meta) {
+    const bytes = new Uint8Array(buffer);
+    return meta.files.map(({ filename, start, end }) => [filename, bytes.subarray(start, end)]);
+  }
+
+  async function loadModels(config, progress, signal) {
+    // Explicit packages belong to the local developer fixture.
+    if (config.packageUrl) {
+      let meta = config.packageMeta;
+      if (!meta) {
+        const response = await fetch(config.packageMetaUrl, { signal });
+        if (!response.ok) throw new Error('无法读取识别模型索引');
+        meta = await response.json();
+      }
+      if (!meta.files.length) return [];
+      return unpack(await fetchModel(config.packageUrl, signal), meta);
+    }
     let cache;
     let cacheError;
     try { cache = await caches.open(CACHE_NAME); } catch (error) { cacheError = error; }
     if (cache) {
       for (const key of [CACHE_KEY, LEGACY_CACHE_KEY]) {
         try {
+          signal.throwIfAborted();
           const hit = await cache.match(key);
           if (!hit) continue;
+          signal.throwIfAborted();
           const buffer = await verified(await hit.arrayBuffer(), PACKAGE_SHA256);
+          signal.throwIfAborted();
           emit({ type: 'model-cache', saved: true, warning: false, message: '识别模型已保存在本地，无需重新下载。' });
           progress('识别模型已缓存，正在加载…');
-          return { url: URL.createObjectURL(new Blob([buffer])), meta: PACKAGE_META, owned: true };
+          return unpack(buffer, PACKAGE_META);
         } catch (error) {
+          signal.throwIfAborted();
           cacheError = error;
           if (error.name === 'ModelIntegrityError') {
             try { await cache.delete(key); } catch (error) { cacheError = error; }
@@ -330,6 +357,7 @@
         }
       }
     }
+    signal.throwIfAborted();
     emit({ type: 'model-cache', saved: false, warning: false, message: '本地未找到可用模型，正在下载…' });
     // unlimitedStorage protects the extension from quota/eviction. Also request
     // persistence where the StorageManager API is supported (e.g. web tests).
@@ -338,23 +366,26 @@
     const meta = { files: [], remote_package_size: 0 };
     for (const file of MODEL_FILES) {
       progress('本地未找到模型，下载' + file.label + '…');
-      const buffer = await verified(await fetchModel(file.url), file.sha256);
+      const buffer = await verified(await fetchModel(file.url, signal), file.sha256);
+      signal.throwIfAborted();
       const start = meta.remote_package_size;
       parts.push(buffer);
       meta.files.push({ filename: file.fs, start, end: start + buffer.byteLength });
       meta.remote_package_size += buffer.byteLength;
     }
-    const blob = new Blob(parts, { type: 'application/octet-stream' });
     try {
       if (!cache) throw cacheError || new Error('Cache Storage unavailable');
+      const blob = new Blob(parts, { type: 'application/octet-stream' });
       await cache.put(CACHE_KEY, new Response(blob, { headers: { 'X-JLS-Metadata': JSON.stringify(meta) } }));
       if (!await cache.match(CACHE_KEY)) throw new Error('Cache readback failed');
+      signal.throwIfAborted();
       emit({ type: 'model-cache', saved: true, warning: false, message: '识别模型已保存，重开浏览器后可直接加载。' });
     } catch (error) {
+      signal.throwIfAborted();
       const reason = error.name === 'QuotaExceededError' ? '本地存储空间不足' : '浏览器未能写入本地缓存';
-      emit({ type: 'model-cache', saved: false, warning: true, message: `模型可以用于本次识别，但${reason}；重开浏览器可能需要重新下载。` });
+      emit({ type: 'model-cache', saved: false, warning: true, message: `模型可以用于本次识别，但${reason}，下次开始字幕可能需要重新下载。` });
     }
-    return { url: URL.createObjectURL(blob), meta, owned: true };
+    return parts.map((buffer, index) => [MODEL_FILES[index].fs, new Uint8Array(buffer)]);
   }
 
   // ------------------------------------------------------------ text helpers
@@ -545,41 +576,35 @@
   }
 
   // ------------------------------------------------------------ init
-  async function loadRuntime(config, progress) {
+  async function loadRuntime(progress) {
     if (!runtimePromise) {
       runtimePromise = (async () => {
-        // Explicit package URLs are for the developer test harness only.
-        const pkg = config.packageUrl
-          ? { url: config.packageUrl, meta: config.packageMeta || (await (await fetch(config.packageMetaUrl)).json()) }
-          : await buildPackage(progress);
+        const wasmBase = baseUrl() + 'wasm/';
+        let resolveRuntime, rejectRuntime;
+        const initialized = new Promise((resolve, reject) => { resolveRuntime = resolve; rejectRuntime = reject; });
+        initialized.catch(() => {});
+        const module = window.Module = {
+          locateFile: path => wasmBase + path,
+          // Initialize the generated runtime without its default model package.
+          // Verified files are mounted only while creating native sessions.
+          _dataPackageMetadata: { files: [], remote_package_size: 0 },
+          getPreloadedPackage: () => new ArrayBuffer(0),
+          print: text => { if (text) progress(String(text)); },
+          printErr: text => { if (text) progress(String(text)); },
+          setStatus: text => { if (text) progress(String(text)); },
+          onRuntimeInitialized: () => resolveRuntime(module),
+          onAbort: reason => rejectRuntime(new Error(String(reason))),
+        };
+        progress('加载识别运行时…');
+        await loadScript(wasmBase + 'sherpa-onnx-asr.js');
+        await loadScript(wasmBase + 'sherpa-onnx-vad.js');
+        await loadScript(wasmBase + 'sherpa-onnx-wasm-main-vad-asr.js');
+        let timeout;
         try {
-          const wasmBase = baseUrl() + 'wasm/';
-          let resolveRuntime, rejectRuntime;
-          const initialized = new Promise((resolve, reject) => { resolveRuntime = resolve; rejectRuntime = reject; });
-          initialized.catch(() => {});
-          const module = window.Module = {
-            locateFile: path => path.endsWith('.data') ? pkg.url : wasmBase + path,
-            print: text => { if (text) progress(String(text)); },
-            printErr: text => { if (text) progress(String(text)); },
-            setStatus: text => { if (text) progress(String(text)); },
-            onRuntimeInitialized: () => resolveRuntime(module),
-            onAbort: reason => rejectRuntime(new Error(String(reason))),
-          };
-          if (pkg.meta) module._dataPackageMetadata = pkg.meta;
-          progress('加载识别运行时…');
-          // Define wrappers before a cached model can initialize the runtime.
-          await loadScript(wasmBase + 'sherpa-onnx-asr.js');
-          await loadScript(wasmBase + 'sherpa-onnx-vad.js');
-          await loadScript(wasmBase + 'sherpa-onnx-wasm-main-vad-asr.js');
-          let timeout;
-          try {
-            return await Promise.race([initialized, new Promise((_, reject) => {
-              timeout = setTimeout(() => reject(new Error('识别运行时加载超时')), 300000);
-            })]);
-          } finally { clearTimeout(timeout); }
-        } finally {
-          if (pkg.owned) URL.revokeObjectURL(pkg.url);
-        }
+          return await Promise.race([initialized, new Promise((_, reject) => {
+            timeout = setTimeout(() => reject(new Error('识别运行时加载超时')), 300000);
+          })]);
+        } finally { clearTimeout(timeout); }
       })().catch(error => {
         scripts.delete(baseUrl() + 'wasm/sherpa-onnx-wasm-main-vad-asr.js');
         runtimePromise = null;
@@ -597,21 +622,41 @@
       baseUrl: config.baseUrl || 'https://api.deepseek.com', promptVersion: config.promptVersion || PROMPT_VERSION,
       temperature: config.temperature ?? 0.2, maxTokens: config.maxTokens ?? 512 });
     onEvent = config.onEvent || (() => {});
-    await loadDomain();
-    if (epoch !== generation) throw new DOMException('采集已取消', 'AbortError');
-    domainCorrector = window.JLSASRDomain.create(domainData, asrDomain);
-    const module = await loadRuntime(config, message => {
+    const controller = modelLoad = new AbortController();
+    const { signal } = controller;
+    const progress = message => {
       if (epoch === generation) emit({ type: 'progress', message });
-    });
-    if (epoch !== generation) throw new DOMException('采集已取消', 'AbortError');
-    const t0 = performance.now();
+    };
     try {
-      setupRuntime(module);
+      await loadDomain();
+      signal.throwIfAborted();
+      domainCorrector = window.JLSASRDomain.create(domainData, asrDomain);
+      const files = await loadModels(config, progress, signal);
+      signal.throwIfAborted();
+      const module = await abortable(loadRuntime(progress), signal);
+      signal.throwIfAborted();
+      const t0 = performance.now();
+      setupWithModels(module, files);
       ready = started = true;
       emit({ type: 'ready', initMs: Math.round(performance.now() - t0) });
     } catch (error) {
-      stop();
+      if (epoch === generation) stop();
       throw error;
+    } finally {
+      if (modelLoad === controller) modelLoad = null;
+    }
+  }
+
+  function setupWithModels(module, files) {
+    const mounted = [];
+    try {
+      for (const [filename, bytes] of files) {
+        module.FS_createDataFile(filename, null, bytes, true, false, true);
+        mounted.push(filename);
+      }
+      setupRuntime(module);
+    } finally {
+      for (const filename of mounted) module.FS_unlink(filename);
     }
   }
 
@@ -661,6 +706,8 @@
 
   function stop() {
     ++generation;
+    modelLoad?.abort();
+    modelLoad = null;
     started = ready = false;
     resetTranslationState();
     onEvent = () => {};

@@ -123,18 +123,19 @@ test('stop during engine initialization stops media and suppresses late progress
   assert.equal(context.messages.some(m => m.event?.text === 'late private text'), false);
 });
 
-function engine({ runtimeReady = true, runtimeFailure = false, decodeFailure = false, cache, fetcher, domainFetcher, cryptoImpl = webcrypto, clock, urlImpl = URL, requestTimeoutMs } = {}) {
+function engine({ runtimeReady = true, runtimeFailure = false, setupFailure = false, decodeFailure = false, cache, fetcher, domainFetcher, cryptoImpl = webcrypto, clock, requestTimeoutMs } = {}) {
   let speech = true, moduleReady;
   let hypothesis = 'PRIVATE_TAB_A';
   let vadSegment = { samples: new Float32Array(9600), start: 0 };
   const decodedAudio = [];
   const requests = [], events = [], scripts = [];
+  const mounted = new Map(), nativeSetups = [];
   let freedStreams = 0, removedScripts = 0;
   let recognizerConfig;
   const sandbox = vm.createContext({
     console, crypto: cryptoImpl, performance,
     Date: clock ? class extends Date { static now() { return clock.now; } } : Date,
-    Float32Array, Uint8Array, Blob, URL: urlImpl, Response, TextEncoder,
+    Float32Array, Uint8Array, Blob, URL, Response, TextEncoder,
     DOMException, AbortController,
     setTimeout: (fn, delay) => setTimeout(fn, delay === 12000 && requestTimeoutMs !== undefined ? requestTimeoutMs : delay), clearTimeout,
     navigator: { storage: { persist: async () => true } },
@@ -144,7 +145,11 @@ function engine({ runtimeReady = true, runtimeFailure = false, decodeFailure = f
       : fetcher ? fetcher(url, options) : (() => { const request = deferred(); requests.push({ ...request, url, options }); return request.promise; })(),
     createVad: () => ({ free() {}, acceptWaveform() {}, isDetected: () => speech, isEmpty: () => false, front: () => vadSegment, pop() {} }),
     OfflineRecognizer: class {
-      constructor(config) { recognizerConfig = config; }
+      constructor(config) {
+        recognizerConfig = config;
+        nativeSetups.push([...mounted.keys()]);
+        if (setupFailure) throw new Error('native setup failed');
+      }
       free() {}
       createStream() { return { acceptWaveform(rate, audio) { decodedAudio.push(audio.slice()); }, free() { freedStreams++; } }; }
       decode() { if (decodeFailure) throw new Error('decode fixture failed'); }
@@ -157,6 +162,11 @@ function engine({ runtimeReady = true, runtimeFailure = false, decodeFailure = f
     if (script.src.endsWith('/asr-domain.js')) vm.runInContext(read('asr-domain.js'), sandbox);
     if (script.src.endsWith('sherpa-onnx-wasm-main-vad-asr.js')) {
       if (runtimeFailure) { script.onerror(); return; }
+      sandbox.Module.FS_createDataFile = (filename, _, bytes) => {
+        assert(!mounted.has(filename), 'leftover model file from a previous native setup');
+        mounted.set(filename, bytes);
+      };
+      sandbox.Module.FS_unlink = filename => assert(mounted.delete(filename));
       moduleReady = () => sandbox.Module.onRuntimeInitialized();
       if (runtimeReady) queueMicrotask(moduleReady);
     }
@@ -164,7 +174,7 @@ function engine({ runtimeReady = true, runtimeFailure = false, decodeFailure = f
   } } };
   vm.runInContext(read('asr-engine.js'), sandbox);
   const config = { apiKey: 'sk-fake', packageUrl: 'http://local/mock.data', packageMeta: { files: [], remote_package_size: 0 }, onEvent: e => events.push(e) };
-  return { api: sandbox.JLSEngine, config, events, requests, scripts, decodedAudio, ready: () => moduleReady(),
+  return { api: sandbox.JLSEngine, config, events, requests, scripts, decodedAudio, mounted, nativeSetups, ready: () => moduleReady(),
     get recognizerConfig() { return recognizerConfig; },
     get freedStreams() { return freedStreams; }, get removedScripts() { return removedScripts; },
     hypothesis(text) { hypothesis = text; },
@@ -237,27 +247,51 @@ test('100 capture restarts abort pending translations and reuse the loaded runti
   assert.equal(context.scripts.length, 4);
 });
 
-test('temporary model blob URLs and loader scripts are released on success and failed retries', async () => {
-  for (const runtimeFailure of [false, true]) {
-    const active = new Set();
-    let created = 0;
-    class OwnedURLs extends URL {
-      static createObjectURL() { const url = 'blob:fixture-' + (++created); active.add(url); return url; }
-      static revokeObjectURL(url) { active.delete(url); }
-    }
+test('verified model files are released after native setup succeeds or fails', async () => {
+  for (const setupFailure of [false, true]) {
     const fixtures = modelFixtures();
-    const context = engine({ runtimeFailure, cryptoImpl: fixtures.cryptoImpl, fetcher: fixtures.fetcher, urlImpl: OwnedURLs });
+    const context = engine({ setupFailure, ...fixtures, cache: extensionCache() });
     try {
-      for (let attempt = 0; attempt < (runtimeFailure ? 4 : 1); attempt++) {
+      for (let attempt = 0; attempt < 2; attempt++) {
         const initializing = context.api.init({ apiKey: 'sk-fake' });
-        if (runtimeFailure) await assert.rejects(initializing, /无法加载/);
+        if (setupFailure) await assert.rejects(initializing, /native setup failed/);
         else await initializing;
-        assert.equal(active.size, 0, 'the engine must revoke every package URL it owns');
+        assert.deepEqual(context.nativeSetups.at(-1), ['/sense-voice.onnx', '/silero_vad.onnx', '/tokens.txt']);
+        assert.equal(context.mounted.size, 0);
       }
       assert.equal(context.removedScripts, context.scripts.length);
-      assert.equal(created, runtimeFailure ? 4 : 1);
+      assert.equal(context.scripts.length, 4, 'reopening the model must reuse the runtime');
+      assert.equal(fixtures.downloads, 3, 'warm setup must read the existing cache');
     } finally { context.api.stop(); }
   }
+});
+
+test('failed runtime startup can retry using the same verified disk cache', async () => {
+  const fixtures = modelFixtures();
+  const context = engine({ runtimeFailure: true, ...fixtures, cache: extensionCache() });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await assert.rejects(context.api.init({ apiKey: 'sk-fake' }), /无法加载/);
+    assert.equal(context.mounted.size, 0);
+  }
+  assert.equal(context.removedScripts, context.scripts.length);
+  assert.equal(fixtures.downloads, 3);
+});
+
+test('stop aborts a model download before it can reach the WASM filesystem', async () => {
+  const download = deferred();
+  const context = engine({ fetcher: (url, { signal }) => {
+    download.resolve(signal);
+    return new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+  } });
+  const start = context.api.init({ onEvent: event => context.events.push(event) });
+  const rejected = assert.rejects(start, { name: 'AbortError' });
+  const signal = await download.promise;
+  context.api.stop();
+  await rejected;
+  assert.equal(signal.aborted, true);
+  assert.equal(context.mounted.size, 0);
+  assert.equal(context.scripts.filter(src => src.includes('/wasm/')).length, 0);
+  assert(context.events.every(event => event.type !== 'ready'));
 });
 
 test('a long utterance only decodes its remaining audio after a forced final', async () => {

@@ -194,14 +194,15 @@
       min-width: min(280px, calc(100% - 24px)); max-width: calc(100% - 24px);
       padding: 12px 20px; border: 1px solid #ffffff0f; border-radius: var(--caption-radius);
       color: var(--caption-color); background: rgba(var(--caption-bg), var(--rest-bg));
+      backdrop-filter: var(--caption-blur);
       box-shadow: 0 6px 26px #0000000d; pointer-events: auto; color-scheme: dark;
       font: 400 14px/1.45 "Segoe UI", "Noto Sans CJK SC", "Yu Gothic UI", system-ui, sans-serif;
-      transition: background .36s cubic-bezier(.22,1,.36,1), border-color .36s ease, box-shadow .36s ease, opacity .36s ease;
+      transition: background .36s cubic-bezier(.22,1,.36,1), border-color .36s ease, box-shadow .36s ease, opacity .36s ease, backdrop-filter .36s ease;
     }
     .wrap.embedded { position: absolute; }
     .wrap[data-anchor="top"] { top: 48px; bottom: auto; }
     .wrap[data-anchor="middle"] { top: 50%; bottom: auto; transform: translate(-50%, -50%); }
-    .wrap.engaged { background: rgba(var(--caption-bg), var(--focus-bg)); border-color: #ffffff29;
+    .wrap.engaged { background: rgba(var(--caption-bg), var(--focus-bg)); backdrop-filter: var(--caption-focus-blur); border-color: #ffffff29;
       box-shadow: 0 12px 38px #0005; }
     .wrap.hidden { display: none; }
     .wrap.empty:not(.engaged) { opacity: 0; pointer-events: none; }
