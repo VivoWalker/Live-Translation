@@ -22,6 +22,10 @@ WASM 与其绑定来自 sherpa-onnx 官方构建，不属于本项目原创代�
 | SenseVoiceSmall 模型权重 | 浏览器及 Python 默认识别模型 | [上游模型卡](https://huggingface.co/FunAudioLLM/SenseVoiceSmall)声明使用独立的 [FunASR 模型许可](https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE)，[本地文本快照](LICENSES/FunASR-MODEL_LICENSE.txt) |
 | SenseVoice ONNX 转换 | 固定的 `2024-07-17` 导出、int8 模型与配套词表 | [csukuangfj / sherpa-onnx SenseVoice 发布目录](https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17)，源自 FunAudioLLM / FunASR；权重许可独立于推理框架 |
 | Whisper | 可选的多语言 base int8 编码器、解码器与词表 | [MIT，OpenAI](LICENSES/Whisper-MIT.txt) · [上游](https://github.com/openai/whisper) · [ONNX 发布](https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models) |
+| Whisper Large V3 Turbo | 可选 CTranslate2 格式权重 | [OpenAI Whisper MIT](https://github.com/openai/whisper) · [参考转换制品](https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo) |
+| Parakeet TDT-CTC 0.6B Japanese | 可选 NeMo `.nemo` 权重 | [NVIDIA 模型卡，CC BY 4.0](https://huggingface.co/nvidia/parakeet-tdt_ctc-0.6b-ja) |
+| Qwen3-ASR-1.7B | 可选 Transformers 本地权重 | [Qwen 模型卡，Apache-2.0](https://huggingface.co/Qwen/Qwen3-ASR-1.7B) |
+| Community-1 | 可选录播说话人模型 | [pyannote 模型卡，CC BY 4.0 与权重获取条款](https://huggingface.co/pyannote/speaker-diarization-community-1) |
 | Silero VAD | 浏览器与 Python 的语音分段 | [MIT，Silero Team](LICENSES/Silero-VAD-MIT.txt) · [上游](https://github.com/snakers4/silero-vad) |
 
 SenseVoice **源码许可与模型权重许可不同**。不能把 sherpa-onnx 的 Apache-2.0 或本项目的 MIT 直接当作 SenseVoice 权重许可。这里记录的是 2026-11-17 核对到的上游声明；实际取得的具体模型副本仍以其随附条款及适用授权为准。
@@ -36,6 +40,11 @@ Python 运行依赖由 `requirements.txt` 安装，开发依赖由 `requirements
 - [websockets](https://github.com/python-websockets/websockets)：BSD-3-Clause。
 - [SoundFile](https://github.com/bastibe/python-soundfile)：BSD-3-Clause；系统或 wheel 中的 libsndfile 保留自己的 LGPL 许可。
 - [edge-tts](https://github.com/rany2/edge-tts)：LGPL-3.0；相关在线语音服务另有条款。
+- Parakeet 的可选组使用 NeMo 与 PyTorch。 [NeMo，Apache-2.0](https://github.com/NVIDIA/NeMo) · [PyTorch，BSD-3-Clause](https://github.com/pytorch/pytorch)
+- Turbo 的可选组使用 faster-whisper 与 CTranslate2。 [faster-whisper，MIT](https://github.com/SYSTRAN/faster-whisper) · [CTranslate2，MIT](https://github.com/OpenNMT/CTranslate2)
+- Qwen3-ASR 的可选组使用 Qwen ASR 和 Transformers。 [Qwen ASR，Apache-2.0](https://github.com/QwenLM/Qwen3-ASR) · [Transformers，Apache-2.0](https://github.com/huggingface/transformers)
+- 说话人分离与评估使用 pyannote.audio 和 pyannote.metrics。 [pyannote.audio](https://github.com/pyannote/pyannote-audio) · [pyannote.metrics](https://github.com/pyannote/pyannote-metrics)
+- Benchmark 可选用 Janome（Apache-2.0，附带词典声明）、SacreBLEU（Apache-2.0）与 psutil（BSD-3-Clause）。 [Janome](https://github.com/mocobeta/janome) · [SacreBLEU](https://github.com/mjpost/sacrebleu) · [psutil](https://github.com/giampaolo/psutil)
 
 本文件列出直接使用的主要组件，不替代依赖分发包提供的完整清单。重新打包包含运行环境的发行物时，应一并保留所携带依赖的许可文本。
 
@@ -45,5 +54,6 @@ Python 运行依赖由 `requirements.txt` 安装，开发依赖由 `requirements
 - 可选的公共 Google 翻译端点适用服务方条款；本项目不为服务可用性或使用权限作额外授权。
 - 词表中的人名、角色名、团体名、歌曲名与作品名称用于识别和事实性标识，不表示与相关个人或权利方存在合作、授权或背书关系。
 - 测试音频和示例中的人声、录音及第三方内容不因代码采用 MIT 而获得额外的再利用授权。
+- 本地对照使用 JSUT Basic5000 的研究用途样本。音频保留原作者使用条款，评估仓库只记录来源、配置和汇总结果。 [JSUT 来源及音频使用条款](https://huggingface.co/datasets/FluidInference/JSUT-basic5000/blob/cd13cc9c9fe70d8d4f62ffe6fbbb872aef79835c/README_en.txt)
 
 本声明保留实际使用的组件来源；未将第三方内容重新署名为本项目原创。
