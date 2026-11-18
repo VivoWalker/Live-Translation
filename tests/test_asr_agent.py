@@ -11,7 +11,7 @@ import numpy as np
 
 from server.asr import Recognition
 from server.asr_agent import Action, OptimizationAgent, refine_offline
-from server.asr_domain import EpisodeTerm
+from server.asr_domain import DomainCorrector, EpisodeTerm
 from server.asr_review import ReviewStore, candidates, validate_candidates
 from server.asr_router import DecodeScheduler
 from server.asr_verification import VerificationController, VerificationPolicy
@@ -43,7 +43,34 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                                       backlog=False, provisional=trial.append)
         self.assertEqual((result.action, result.text, trial), (Action.ACCEPT_CORRECTION, VERIFIED, [BASELINE]))
         self.assertEqual(result.changes[0].source, SOURCE)
+        self.assertEqual((result.changes[0].level, result.changes[0].verified, result.changes[0].independent_asr), (3, True, True))
         self.assertEqual(asr.recognize.call_args.args[1].prompt, "")
+
+    async def test_verified_reading_cannot_bypass_conflicts_or_promote_unverified_terms(self):
+        context = DomainSelection("auto", episode=DOMAIN.episode, terms=(
+            DOMAIN.terms[0], EpisodeTerm("夏空多朗", "なつぞらたろう", "character", "normal", True, SOURCE)))
+        asr = SimpleNamespace(transcribe=MagicMock(return_value=VERIFIED))
+        agent = OptimizationAgent(DecodeScheduler(), asr)
+        result = await agent.optimize(PRIMARY, context, AUDIO, forced=False, backlog=False, provisional=lambda _: None)
+        self.assertEqual((result.text, result.reason), (BASELINE, "verification_low_priority"))
+        self.assertTrue(all(item.rule == "conflicting_alias" for item in result.candidates))
+        asr.transcribe.assert_not_called()
+        unverified = DomainSelection("auto", terms=(
+            EpisodeTerm("夏空太郎", "なつぞらたろう", "character", "normal", False, SOURCE),))
+        result = await agent.optimize(PRIMARY, unverified, AUDIO, forced=False, backlog=False, provisional=lambda _: None)
+        self.assertEqual(result.text, BASELINE)
+        self.assertFalse(result.candidates[0].verified)
+        asr.transcribe.assert_not_called()
+
+    async def test_verification_compares_raw_hypotheses_and_preserves_nonoverlapping_safe_edits(self):
+        raw = "日高真白となつぞらたろうです。"
+        corrector = DomainCorrector(["mashiro"], episode_terms=DOMAIN.terms)
+        text, changes, suggestions = corrector.inspect(raw)
+        primary = Recognition(text, raw, changes=changes, candidates=suggestions)
+        secondary = SimpleNamespace(transcribe=lambda _: "日高真白と夏空太郎です。")
+        agent = OptimizationAgent(DecodeScheduler(), secondary)
+        result = await agent.optimize(primary, None, AUDIO, forced=False, backlog=False, provisional=lambda _: None)
+        self.assertEqual(result.text, "陽高真白と夏空太郎です。")
 
     async def test_uncertain_disagreement_and_ordinary_audio(self):
         asr = SimpleNamespace(transcribe=MagicMock(return_value="別の名前を言いました。"))

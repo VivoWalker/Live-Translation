@@ -44,7 +44,8 @@ class ReviewStore:
         trace = {"episode": episode, "original": primary.original[:MAX_TEXT], "baseline": primary.text[:MAX_TEXT],
                  "proposed": (decision.alternative or decision.text)[:MAX_TEXT], "displayed": decision.text[:MAX_TEXT],
                  "action": decision.action.value, "reason": decision.reason, "signals": decision.signals,
-                 "changes": [asdict(change) for change in changes[:8]]}
+                 "changes": [asdict(change) for change in changes[:8]],
+                 "candidates": [asdict(change) for change in decision.candidates[:8]]}
         with closing(self._connect()) as db, db:
             db.execute("INSERT OR IGNORE INTO review(session,segment,trace) VALUES(?,?,?)",
                        (session, segment, json.dumps(trace, ensure_ascii=False)))

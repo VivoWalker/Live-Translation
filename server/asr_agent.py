@@ -42,10 +42,15 @@ class Decision:
     alternative: str = ""
     changes: tuple[Correction, ...] = ()
     verification_wait_ms: float = 0
+    candidates: tuple[Correction, ...] = ()
 
 
 def assess(primary: Recognition, context: DomainSelection | None, audio: np.ndarray, forced: bool) -> Decision:
     text = primary.text
+    original = normalize_ja(primary.original)
+    candidates = primary.candidates
+    if context and context.terms and context.corrector is None:
+        _, _, candidates = DomainCorrector([], episode_terms=context.terms).inspect(original)
     signals = []
     if forced and not looks_complete(text):
         signals.append("forced_boundary")
@@ -53,37 +58,41 @@ def assess(primary: Recognition, context: DomainSelection | None, audio: np.ndar
         signals.append("repetition")
     if audio.size and (np.sqrt(np.mean(np.square(audio))) < .008 or np.mean(np.abs(audio) >= .99) > .03):
         signals.append("low_signal_or_clipping")
-    for term in context.terms if context else ():
-        spellings = (term.reading, *term.aliases) if term.verified else (term.canonical, term.reading, *term.aliases)
-        if any(len(spelling) >= 4 and spelling in text for spelling in spellings):
-            signals.append("verified_reading" if term.verified else "unverified_term")
+    if any(item.rule == "episode_candidate" and len(item.alias) >= 4 for item in candidates):
+        signals.append("verified_reading")
+    elif candidates:
+        signals.append("candidate_suggestion")
     if signals:
-        return Decision(Action.NEED_RETRANSCRIPTION, text, "risk_signals", tuple(dict.fromkeys(signals)))
+        return Decision(Action.NEED_RETRANSCRIPTION, text, "risk_signals", tuple(signals),
+                        candidates=candidates)
     if primary.changes:
         return Decision(Action.ACCEPT_CORRECTION, text, "curated_lexicon", changes=primary.changes)
     return Decision(Action.ACCEPT_ORIGINAL, text, "no_risk_signal")
 
 
-def compare(plan: Decision, alternate: str, context: DomainSelection | None) -> Decision:
+def compare(plan: Decision, alternate: str, primary: Recognition) -> Decision:
     text = plan.text
+    original = normalize_ja(primary.original)
     alternate = normalize_ja(alternate)
     if not alternate:
         return Decision(Action.UNCERTAIN, text, "empty_secondary", plan.signals)
     suffix = "。！？!?"
-    if text.rstrip(suffix) == alternate.rstrip(suffix):
+    if original.rstrip(suffix) == alternate.rstrip(suffix):
         return Decision(Action.ACCEPT_ORIGINAL, text, "agreement", plan.signals, alternate)
-    for term in context.terms if context else ():
-        if not term.verified:
+    for item in plan.candidates:
+        if (item.rule != "episode_candidate" or not item.verified or len(item.alias) < 4
+                or original.count(item.alias) != 1 or original[item.start:item.end] != item.alias
+                or any(change.start < item.end and item.start < change.end for change in primary.changes)):
             continue
-        for alias in (term.reading, *term.aliases):
-            if len(alias) < 4 or alias == term.canonical or text.count(alias) != 1:
-                continue
-            start = text.index(alias)
-            proposed = text[:start] + term.canonical + text[start + len(alias):]
-            if alternate.rstrip(suffix) == proposed.rstrip(suffix):
-                change = Correction(alias, term.canonical, start, start + len(alias), term.source)
-                return Decision(Action.ACCEPT_CORRECTION, proposed, "independent_asr_and_verified_term",
-                                plan.signals, alternate, (change,))
+        proposed = original[:item.start] + item.canonical + original[item.end:]
+        if alternate.rstrip(suffix) != proposed.rstrip(suffix):
+            continue
+        change = replace(item, independent_asr=True, rule="independent_asr_and_verified_term", decision="accepted")
+        revised = original
+        for edit in sorted((*primary.changes, change), key=lambda change: -change.start):
+            revised = revised[:edit.start] + edit.canonical + revised[edit.end:]
+        return Decision(Action.ACCEPT_CORRECTION, revised, "independent_asr_and_verified_term",
+                        plan.signals, alternate, (change,))
     return Decision(Action.UNCERTAIN, text, "hypothesis_conflict", plan.signals, alternate)
 
 
@@ -123,7 +132,7 @@ class OptimizationAgent:
         decision = plan
         if plan.action == Action.NEED_RETRANSCRIPTION:
             self.counts["segments_flagged"] += 1
-            decision = await self._verify(plan, context, audio, backlog, provisional)
+            decision = replace(await self._verify(plan, primary, audio, backlog, provisional), candidates=plan.candidates)
         self.counts["corrections_accepted"] += int(decision.action == Action.ACCEPT_CORRECTION or bool(primary.changes))
         self.counts["secondary_corrections_accepted"] += int(
             decision.reason == "independent_asr_and_verified_term")
@@ -134,7 +143,7 @@ class OptimizationAgent:
         self.wait_times.append(decision.verification_wait_ms)
         return decision
 
-    async def _verify(self, plan, context, audio, backlog, provisional):
+    async def _verify(self, plan, primary, audio, backlog, provisional):
         controller = self.controller
         duration = len(audio) / SAMPLE_RATE
         high_value = ("verified_reading" in plan.signals or "repetition" in plan.signals
@@ -186,7 +195,7 @@ class OptimizationAgent:
                 self.counts["secondary_attempts"] -= 1
                 return self._skip(plan, "secondary_busy")
             controller.completed_in_budget()
-            decision = compare(plan, alternate, context)
+            decision = compare(plan, alternate, primary)
         return replace(decision, verification_wait_ms=round((time.perf_counter() - started) * 1000, 3))
 
     def _skip(self, plan, reason):
@@ -212,4 +221,5 @@ async def refine_offline(primary, context, audio, verifiers):
         return replace(first, verification_wait_ms=sum(item.verification_wait_ms for item in proposals))
     alternative = next((item.alternative for item in proposals if item.alternative), "")
     return Decision(Action.UNCERTAIN, primary.text, "offline_model_disagreement", first.signals,
-                    alternative, verification_wait_ms=sum(item.verification_wait_ms for item in proposals))
+                    alternative, verification_wait_ms=sum(item.verification_wait_ms for item in proposals),
+                    candidates=first.candidates)

@@ -512,9 +512,14 @@
 
   // ------------------------------------------------------------ text helpers
   function normalizeJa(text) {
+    const cjk = '[\\u3000-\\u30ff\\u3400-\\u4dbf\\u4e00-\\u9fff\\uff00-\\uffef]';
     return (text || '')
-      .replace(/([\u3000-\u30ff\u3400-\u9fff\uff00-\uffef])\s+(?=[\u3000-\u30ff\u3400-\u9fff\uff00-\uffef])/g, '$1')
-      .replace(/\s+([、。！？])/g, '$1')
+      .replaceAll('\u3000', ' ')
+      .trim()
+      .replace(new RegExp(`(?<=${cjk})[ \\t]+(?=${cjk})`, 'g'), '')
+      .replace(new RegExp(`(?<=${cjk})[ \\t]+(?=[A-Za-z0-9])|(?<=[A-Za-z0-9])[ \\t]+(?=${cjk})`, 'g'), '')
+      .replace(/[ \t]{2,}/g, ' ')
+      .replaceAll(' ,', '、').replaceAll(' .', '。')
       .trim();
   }
 

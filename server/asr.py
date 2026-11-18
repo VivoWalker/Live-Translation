@@ -45,6 +45,7 @@ class Recognition:
     original: str
     timestamps: tuple[tuple[float, float, str], ...] = ()
     changes: tuple[Correction, ...] = ()
+    candidates: tuple[Correction, ...] = ()
 
 
 class Recognizer(Protocol):
@@ -164,8 +165,8 @@ class _OfflineRecognizer:
         text = result.text
         if self.language == "ja":
             corrector = context.corrector if context and context.corrector is not None else self.domain
-            text, changes = corrector.explain(normalize_ja(result.text))
-            return Recognition(text, result.original, result.timestamps, changes)
+            text, changes, candidates = corrector.inspect(normalize_ja(result.text))
+            return Recognition(text, result.original, result.timestamps, changes, candidates)
         return result
 
     def _infer(self, audio: np.ndarray, context: RecognitionContext | None) -> Recognition:
