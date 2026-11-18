@@ -210,6 +210,9 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                         mode = data.get("mode")
                         if mode not in (None, "fast", "enhanced") or ("agent" in data and type(data["agent"]) is not bool):
                             raise ValueError("Invalid recognition mode or Agent setting")
+                        request_id = data.get("request_id")
+                        if "request_id" in data and (type(request_id) is not int or not 0 <= request_id < 2**31):
+                            raise ValueError("Invalid configuration request ID")
                         domain = (state.episodes.resolve(data["domain"], title=data.get("page_title", ""),
                                                          packs=data.get("packs")) if "domain" in data else None)
                         await session.set_target(target)
@@ -222,6 +225,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                         out.put({"type": "config", "ok": True, "target": target,
                                  "context_turns": cfg.context_turns,
                                  "asr_mode": state.asr_mode, "agent": {"enabled": session.agent is not None},
+                                 **({"request_id": request_id} if request_id is not None else {}),
                                  **({"domain": domain.public()} if domain else {})})
                     elif kind == "ping":
                         out.put({"type": "pong", "t": time.time()})

@@ -84,8 +84,9 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
         async with await self.connect() as ws:
             await ws.send_json({"type": "config", "target": "en", "mode": "enhanced",
                                 "agent": False, "context_turns": 3, "domain": "auto",
-                                "page_title": "初星学園HR"})
+                                "page_title": "初星学園HR", "request_id": 7})
             config = await ws.receive_json()
+            self.assertEqual(config["request_id"], 7)
             self.assertEqual(config["asr_mode"], "fast")
             self.assertFalse(config["agent"]["enabled"])
             self.assertEqual(config["domain"]["episode"], "初星学園HR")

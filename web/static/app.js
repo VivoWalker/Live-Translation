@@ -116,6 +116,8 @@
   }
 
   function handle(session, message) {
+    if (session.pendingConfig && (message.type === 'translation' || message.type === 'translation_cancelled'
+        || message.scope === 'translate')) return;
     switch (message.type) {
       case 'ready':
         $('engine').textContent = message.asr + ' / ' + message.translator;
@@ -154,6 +156,16 @@
       case 'translation_cancelled':
         captions.translationFailed(message.id);
         break;
+      case 'config': {
+        const pending = session.pendingConfig;
+        if (pending && message.ok && (message.request_id ?? pending.id) === pending.id && message.target === pending.target) {
+          session.pendingConfig = null;
+          session.hasCaption = false;
+          captions.clear();
+          updateView();
+        }
+        break;
+      }
     }
   }
 
@@ -198,7 +210,7 @@
       accessToken.focus();
       return;
     }
-    const session = { kind, abort: new AbortController(), hasCaption: false, congested: false,
+    const session = { kind, abort: new AbortController(), hasCaption: false, congested: false, requestId: 0, pendingConfig: null,
       stageMessage: kind === 'display' ? '选择带音频的标签页' : '加载日语样本' };
     active = session;
     setStatus('准备中', 'busy');
@@ -285,10 +297,9 @@
     try { localStorage.setItem(targetKey, target.value); } catch {}
     updateTarget();
     if (active?.ws?.readyState === WebSocket.OPEN) {
-      active.ws.send(JSON.stringify({ type: 'config', target: target.value }));
-      active.hasCaption = false;
-      captions.clear();
-      updateView();
+      const id = ++active.requestId;
+      active.pendingConfig = { id, target: target.value };
+      active.ws.send(JSON.stringify({ type: 'config', target: target.value, request_id: id }));
     }
   });
   window.addEventListener('pagehide', () => stop());
