@@ -304,10 +304,12 @@ try {
   checks.push('long translation survives later short sentences; bounded visible rows and explicit catch-up');
   await shot('rest');
   const resting = await evaluate(`getComputedStyle(cap('.wrap')).backgroundColor`);
+  assert.equal(await evaluate(`getComputedStyle(cap('.wrap')).backdropFilter`), 'blur(2px)');
   let rect = await bounds(); await move(rect.x + rect.width / 2, rect.y + 20); await sleep(550);
   const active = await evaluate(`getComputedStyle(cap('.wrap')).backgroundColor`);
   assert.notEqual(resting, active);
   assert(active.includes('0.93'), active);
+  assert.equal(await evaluate(`getComputedStyle(cap('.wrap')).backdropFilter`), 'blur(18px)');
   assert.equal(await evaluate(`getComputedStyle(cap('.toolbar')).opacity`), '1');
   await click('.settings-toggle'); await sleep(320);
   assert.equal(await evaluate(`cap('.settings').hidden`), false);
@@ -318,6 +320,14 @@ try {
   assert.equal(await evaluate(`cap('.settings').hidden`), false, 'moving through the hover gap must not dismiss settings');
   await shot('settings');
   checks.push('hover strengthens only the background and reveals working style controls');
+  await evaluate(`(() => {
+    const input = cap('[data-setting="blur"]');
+    input.checked = false; input.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await sleep(400);
+  assert.equal(await evaluate(`getComputedStyle(cap('.wrap')).backdropFilter`), 'none');
+  assert.equal(await evaluate(`getComputedStyle(cap('.zh')).opacity`), '1');
+  checks.push('background blur can be disabled without changing caption text opacity');
   await evaluate(`for(const[key,value]of Object.entries({fontSize:30,sourceSize:19,width:72,background:12,color:'#fff1ce'})){const el=cap('[data-setting="'+key+'"]');el.value=value;el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}))}`);
   await sleep(400);
   assert.equal(await evaluate(`getComputedStyle(cap('.zh')).fontSize`), '30px');
@@ -343,6 +353,7 @@ try {
   await evaluate(`final(10,'保存した設定を確認しています。','样式和位置已保留，重新打开页面后可以接着使用。')`); await sleep(300);
   assert.equal(await evaluate(`cap('.wrap').style.getPropertyValue('--font-size')`), '30px');
   assert.equal(await evaluate(`cap('.wrap').style.getPropertyValue('--caption-color')`), '#fff1ce');
+  assert.equal(await evaluate(`cap('.wrap').style.getPropertyValue('--caption-blur')`), 'none');
   rect = await bounds(); assert(rect.x >= 11 && rect.y >= 43 && rect.right <= 1269, JSON.stringify(rect));
   checks.push('public style and normalized position preferences survive a fresh page');
   await evaluate(`cap('.drag').focus()`);
