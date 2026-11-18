@@ -14,6 +14,8 @@
 
 所有服务端适配器均在 VAD 分段上执行离线推理。服务按能力决定是否调用滚动预览，较重的 Turbo 与 Qwen 默认只转写最终段。预览等待队列中有最终任务时会跳过，已经开始的原生推理会执行到完成。Qwen 的时间戳需要另外加载对齐模型，本项目默认单模型工作。
 
+作为直播第二模型时，CPU Turbo 和 Qwen 默认不加载，离线修订允许更长的预算。需要验证实时可行性时，可用 `--agent-budget-ms` 显式试跑，观察达到 deadline 的比例和复查附加时延。部署进程报告实际后端和第二模型状态。 [Agent 复查](agentic-asr.md) · [Windows / RTX 本地验收](local-validation.md)
+
 RTX 5070 Laptop 8 GB 的优先试验顺序为单独运行 Parakeet 或 Turbo，再用短片段验证 Qwen 的 BF16 峰值。CUDA PyTorch、CTranslate2 所需 CUDA/cuDNN 与驱动兼容性应从安装环境验证。重量模型适配器属于实验配置，只有相同数据和硬件的实测结果才能支持准确率或资源结论。
 
 Parakeet 的 CPU 测试使用 NeMo 2.5.3、PyTorch/torchaudio 2.8.0 CPU 与 PyArrow 23.0.1。安装前可按设备选择匹配的 PyTorch 和 torchaudio 构建。 [PyTorch 安装方式](https://pytorch.org/get-started/locally/)

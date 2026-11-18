@@ -32,7 +32,7 @@
 
 ## 快速开始
 
-需要 Chrome / Edge 116 或更新版本，以及一个可用的 DeepSeek API Key。
+需要 Chrome / Edge 116 或更新版本。需要中文或英文译文时，准备可用的 DeepSeek API Key。
 
 1. 下载本仓库并解压到固定目录，或执行：
 
@@ -41,8 +41,8 @@
    ```
 
 2. 打开 `chrome://extensions` 或 `edge://extensions`，开启「开发者模式」，点击「加载已解压的扩展」，选择仓库中的 **`extension/`** 目录。
-3. 打开有日语音频的普通网页，点击扩展图标。选择「浏览器内」，填写 DeepSeek Key、选择译文语言，然后点击「开始字幕」。
-4. 首次使用会下载约 **240 MB** 识别模型。加载完成后，声音继续播放，双语字幕显示在网页上。
+3. 打开有日语音频的普通网页，点击扩展图标。选择「浏览器内」后点击「开始字幕」。填写 DeepSeek Key 可开启所选语言的翻译。
+4. 首次使用会下载约 **240 MB** 识别模型，随后显示日语字幕与可用的译文。
 
 模型保存在浏览器管理的本地缓存中。每次开始字幕时从缓存读取和校验，识别器初始化后释放模型文件的临时副本。缓存写入失败时，弹窗会给出提示。更新扩展时在原条目点击「重新加载」，并刷新视频页。保持目录及扩展 ID 可继续使用原有模型缓存与设置。
 
@@ -60,7 +60,7 @@
 | 翻译 | 扩展请求 DeepSeek | Python 服务请求 DeepSeek | Python 服务请求 DeepSeek |
 | 安装要求 | 浏览器扩展 | 扩展与本地服务 | 本地权重、可选推理框架和适合的硬件 |
 
-本地服务通过 WebSocket 接收音频，需要独立的访问令牌。弹窗显示已连接的实际识别模型，并可在失败后切换回浏览器模式。 [本地服务指南](docs/local-service.md) · [模型、精度与制品体积](docs/model-comparison.md)
+本地服务通过 WebSocket 接收音频，需要独立的访问令牌。运行模式是客户端请求，实际模型、回退和复查能力由服务确认。连接失败后可在弹窗切换回浏览器模式。 [本地服务指南](docs/local-service.md) · [模型、精度与制品体积](docs/model-comparison.md)
 
 ## 专名识别
 
@@ -73,9 +73,9 @@
 | ぽぴぱ、バンドリのラス | ポピパ、バンドリのRAS |
 | にじがく、セイハス | ニジガク、せーはす |
 
-在扩展弹窗选择「领域上下文」。手动模式沿用原有词库选择，自动模式按标签页标题启用相关词包。也可关闭词库。选择在下次开始字幕时生效。
+在扩展弹窗选择「领域上下文」。自动模式优先识别唯一核验节目，再匹配企划。标题未匹配时可保留原文、使用自选词库或启用保守直播用语。选择在下次开始字幕时生效。
 
-本地 Agent 可在预算内对疑难片段追加一次本机识别。异常或超时会回到主模型结果。可选的 SQLite 审核保存原假设、原因和来源，支持人工确认及留出集校验。目标节目的准确率仍需使用授权标注音频评估。 [领域词表](docs/asr-domain.md) · [复查与审核](docs/agentic-asr.md)
+本地 Agent 可在模型对应的预算内复查高价值片段。离线工具支持更长预算和独立模型比较。可选 SQLite 审核支持人工核验、留出评估和批准记录。节目准确率需通过授权标注音频评估。 [领域词表](docs/asr-domain.md) · [复查与审核](docs/agentic-asr.md)
 
 ## 翻译与数据流
 
@@ -106,7 +106,7 @@ python -m unittest discover -s tests
 node --test tests/*.test.mjs
 ```
 
-开发分支包含 Python、JavaScript、WebSocket 与 Chromium 回归，以及同条件 CPU 模型对照。 [架构](docs/architecture.md) · [开发指南](docs/development.md) · [Benchmark](docs/benchmark.md) · [验收报告](docs/acceptance.md) · [CHANGELOG](CHANGELOG.md)
+开发分支包含 Python、JavaScript、WebSocket 与 Chromium 回归，以及同条件 CPU 模型对照。 [开发指南](docs/development.md) · [Benchmark](docs/benchmark.md) · [Phase 2 云端验收](docs/phase2-validation.md) · [Windows / RTX 本地验收](docs/local-validation.md) · [CHANGELOG](CHANGELOG.md)
 
 ## 使用边界与排查
 

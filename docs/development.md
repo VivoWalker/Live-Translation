@@ -46,6 +46,7 @@ LICENSES/                   第三方许可文本
 python -m pip install -r requirements.txt -r requirements-dev.txt
 python -m unittest discover -s tests
 node --test tests/*.test.mjs
+python tools/benchmark_mock.py --wire
 ```
 
 测试覆盖固定提示词契约、上下文隔离、LRU 与请求合并、usage 缺失、失败重试、取消和配置切换；也覆盖词表正反例、识别输出到翻译的传递、字幕退场顺序及状态容量限制。单元测试不需要真实模型下载或 API Key。
@@ -107,6 +108,8 @@ JLS_CHROME=/path/to/chromium node tools/cache_check.mjs --model-dir /path/to/sen
 正常客户端使用 100 ms、6400 字节的帧。服务端事件包括 `ready`、`partial`、`final`、`translation`、`translation_cancelled`、`stats` 和 `error`；取消事件带原句 `id`，供字幕层结束等待。模型与访问令牌配置见 [本地服务](local-service.md)，翻译统计见 [翻译与用量](translation.md)。
 
 关键事件按 FIFO 发送，容量为 64。预览与统计分别只保留最新一条。客户端收到配置确认时，上一语言已排队的结果已先行发出，仍在等待的分段会收到取消事件。关键输出或 ASR 音频积压超限时，服务以 1013 结束连接，界面提示重新开始。认证后的 `stats` 提供队列深度、峰值、丢弃的预览数、积压音频字节和跳过的预览次数。客户端音频发送缓冲区超过 64 KiB 时提示积压，达到 128 KiB 上限时结束采集。AudioWorklet 最多保留 20 个尚未确认的音频块。
+
+Phase 2 的 `ready.config_ack` 表示服务会回传配置请求 ID。扩展等认证及本次配置确认后才发送 PCM。确认还包含实际 ASR 模式、复查可用性和领域选择结果。已完成分段的迟到预览会被丢弃。输出失败后，现有关键事件共用两秒排空预算，随后以明确原因结束连接。 [开发基线与验证结果](phase2-validation.md)
 
 演示页使用可选整数 `request_id` 匹配语言设置确认。在确认前会抑制旧语言的译文回填，并在确认后重新显示当前语言的字幕。
 
