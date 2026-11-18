@@ -78,6 +78,18 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
             await ws.send_json({'type': 'auth', 'token': TOKEN})
             self.assertEqual((await ws.receive_json())['asr'], 'whisper-base-int8')
 
+    async def test_session_configuration_reports_actual_mode_and_disables_agent(self):
+        self.state.agent_enabled = True
+        async with await self.connect() as ws:
+            await ws.send_json({"type": "config", "target": "en", "mode": "enhanced",
+                                "agent": False, "context_turns": 3, "domain": "auto",
+                                "page_title": "初星学園HR"})
+            config = await ws.receive_json()
+            self.assertEqual(config["asr_mode"], "fast")
+            self.assertFalse(config["agent"]["enabled"])
+            self.assertEqual(config["domain"]["episode"], "初星学園HR")
+            self.assertEqual(config["context_turns"], 3)
+
     async def test_wrong_token_or_audio_before_auth_closes(self):
         for first in ({'type': 'auth', 'token': 'wrong'}, {'type': 'config'}, None):
             async with self.client.ws_connect(self.server.make_url('/ws')) as ws:

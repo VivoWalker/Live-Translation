@@ -128,6 +128,19 @@ test('server capture reports buffered audio and stops at the hard byte limit', a
   assert.equal(stream.track.stopped, true);
 });
 
+test('enhanced capture sends opted-in context and Agent configuration to the service', async () => {
+  const context = offscreen();
+  const start = context.send({ type: 'jls:offscreen-start', sessionId: 'E', engine: 'server-enhanced',
+    localMode: 'enhanced', agent: true, domainMode: 'auto', pageTitle: '初星学園HR', contextTurns: 3 });
+  await tick();
+  context.requests[0].resolve(media());
+  assert.equal((await start).ok, true);
+  assert.deepEqual(context.sockets[0].sent[1], { type: 'config', target: 'zh', domain: 'auto',
+    page_title: '初星学園HR', context_turns: 3, mode: 'enhanced', agent: true });
+  assert.match(context.messages.find(m => m.phase === 'capturing').message, /未启用 Agent/);
+  await context.send({ type: 'jls:offscreen-stop', sessionId: 'E' });
+});
+
 test('worklet credit bounds unconsumed blocks and signals overrun once', () => {
   const sent = [];
   let processor;
@@ -579,9 +592,14 @@ test('browser-mode popup starts without fetching a local service', async () => {
   element('asr-pack-mashiro').checked = true;
   element('asr-domain-field').change();
   assert.deepEqual(Array.from(saved.jlsAsrPacks), ['mashiro']);
+  element('domain-mode').value = 'auto';
+  element('domain-mode').change();
+  element('context-turns').value = '3';
   await element('start').click();
   assert.equal(calls, 0);
   assert.equal(sent.find(m => m.type === 'jls:start').engine, 'browser');
+  assert.equal(sent.find(m => m.type === 'jls:start').pageTitle, 'test');
+  assert.equal(sent.find(m => m.type === 'jls:start').contextTurns, 3);
   assert.deepEqual(Array.from(sent.find(m => m.type === 'jls:start').asrPacks), ['mashiro']);
 });
 

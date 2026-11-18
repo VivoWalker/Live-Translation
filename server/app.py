@@ -69,6 +69,7 @@ class AppState:
         self.verifier = DecodeScheduler()
         self.verification_rate = RateBudget(.2, 1)
         self.agent_enabled = agent_enabled
+        self.asr_mode = getattr(asr, "mode", "fast")
         self.secondary = secondary
         self.agent_budget_ms = agent_budget_ms
         self.review = review
@@ -183,6 +184,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 
         await ws.send_json({"type": "ready", "asr": state.asr.name, "translator": state.engine, "source": "ja", "target": "zh",
                             "asr_capabilities": state.capabilities, "asr_fallback_from": state.fallback_from,
+                            "asr_mode": state.asr_mode,
                             "agent": {"enabled": state.agent_enabled, "secondary": state.secondary.name if state.secondary else None}})
         writer_task = asyncio.create_task(writer())
         audio_budget = RateBudget(128000, 256000)  # Up to 2x realtime, four-second burst.
@@ -207,6 +209,9 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                         target = data.get("target", cfg.target_lang)
                         if target not in ("zh", "en"):
                             raise ValueError("Unsupported target language")
+                        mode = data.get("mode")
+                        if mode not in (None, "fast", "enhanced") or ("agent" in data and type(data["agent"]) is not bool):
+                            raise ValueError("Invalid recognition mode or Agent setting")
                         domain = (state.episodes.resolve(data["domain"], title=data.get("page_title", ""),
                                                          packs=data.get("packs")) if "domain" in data else None)
                         await session.set_target(target)
@@ -214,8 +219,11 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                             session.set_domain(domain)
                         if "context_turns" in data:
                             session.set_context_turns(data["context_turns"])
+                        if "agent" in data:
+                            session.set_agent(state.new_agent() if data["agent"] else None)
                         out.put({"type": "config", "ok": True, "target": target,
                                  "context_turns": cfg.context_turns,
+                                 "asr_mode": state.asr_mode, "agent": {"enabled": session.agent is not None},
                                  **({"domain": domain.public()} if domain else {})})
                     elif kind == "ping":
                         out.put({"type": "pong", "t": time.time()})

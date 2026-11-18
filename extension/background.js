@@ -28,9 +28,10 @@ async function ensureContentScript(tabId) {
   await chrome.scripting.executeScript({ target: { tabId }, files: ['caption-settings.js', 'caption-overlay.js', 'content.js'] });
 }
 async function start({ tabId, target, serverUrl, streamId, engine = 'browser', apiKey = '', serverToken = '',
-  asrPacks, asrDomain, domainMode, pageTitle, contextTurns }) {
+  asrPacks, asrDomain, domainMode, pageTitle, contextTurns, vad, localMode, agent }) {
   const packs = JLSASRDomain.normalizePacks(asrPacks ?? asrDomain);
   await restored;
+  const previousTab = state.tabId;
   const ticket = ++generation;
   const sessionId = crypto.randomUUID();
   Object.assign(state, { tabId, running: true, sessionId });
@@ -39,6 +40,10 @@ async function start({ tabId, target, serverUrl, streamId, engine = 'browser', a
   await setStatus({ phase: 'starting', message: '准备中…' }, sessionId);
   try {
     await ensureContentScript(tabId);
+    if (!current()) return { ok: false, error: '采集已取消' };
+    const clear = id => chrome.tabs.sendMessage(id, { type: 'jls:clear' }).catch(() => {});
+    await clear(tabId);
+    if (previousTab && previousTab !== tabId) await clear(previousTab);
     if (!current()) return { ok: false, error: '采集已取消' };
     const saved = await chrome.storage.local.get('jlsCaptionPrefs');
     if (!current()) return { ok: false, error: '采集已取消' };
@@ -52,6 +57,7 @@ async function start({ tabId, target, serverUrl, streamId, engine = 'browser', a
       serverUrl: serverUrl || DEFAULT_SERVER, engine, apiKey, serverToken,
       asrPacks: packs, domainMode, pageTitle: domainMode === 'auto' ? String(pageTitle || '').slice(0, 240) : undefined,
       contextTurns: [1, 3, 4, 5].includes(contextTurns) ? contextTurns : undefined,
+      vad, localMode, agent,
     });
     if (!current()) return { ok: false, error: '采集已取消' };
     if (!response?.ok) throw new Error(response?.error || '采集启动失败');

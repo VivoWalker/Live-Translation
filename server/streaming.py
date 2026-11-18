@@ -295,6 +295,11 @@ class StreamSession:
             self.cfg.context_turns = turns
             self._reset_translations()
 
+    def set_agent(self, agent: OptimizationAgent | None) -> None:
+        if bool(self.agent) != bool(agent):
+            self.agent = agent
+            self._reset_translations()
+
     def _reset_translations(self) -> None:
         self.translation_epoch += 1
         self.conversation.clear()
@@ -410,7 +415,7 @@ class StreamSession:
             try:
                 decision = await agent.optimize(primary, domain, audio, forced=forced,
                                                 backlog=self._queued_bytes >= PREVIEW_BACKLOG, provisional=provisional)
-                if epoch == self.translation_epoch:
+                if epoch == self.translation_epoch and self.agent is agent:
                     text = decision.text
                     if self.review and (decision.action != Action.ACCEPT_ORIGINAL or primary.changes):
                         try:

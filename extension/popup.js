@@ -14,7 +14,16 @@ const selectedPacks = () => packIds.filter(id => packInput(id).checked);
 const apiKey = $('apikey');
 const server = $('server');
 const serverToken = $('server-token');
-const sessionFields = [engine, target, apiKey, server, serverToken];
+const domainMode = $('domain-mode');
+const contextTurns = $('context-turns');
+const vadSilence = $('vad-silence');
+const vadSegment = $('vad-segment');
+const agentMode = $('agent-mode');
+const fallback = $('browser-fallback');
+const sessionFields = [engine, target, apiKey, server, serverToken, domainMode, contextTurns, vadSilence, vadSegment, agentMode];
+const settingKeys = ['jlsEngine', 'jlsTarget', 'jlsApiKey', 'jlsServer', 'jlsServerToken',
+  'jlsDomainMode', 'jlsContextTurns', 'jlsVadSilence', 'jlsVadSegment', 'jlsAgentMode'];
+const choice = (value, allowed, defaultValue) => allowed.includes(value) ? value : defaultValue;
 let activeTab, phase = 'idle', operation = 0, ready = false, cacheInfo;
 let prefs = JLS.captionPreferences();
 const preview = JLS.createCaptionPreview($('caption-preview'), { compact: true });
@@ -55,6 +64,7 @@ function setPhase(next, message) {
   startButton.disabled = !ready || active;
   stopButton.hidden = !active;
   stopButton.disabled = phase === 'stopping';
+  fallback.hidden = phase !== 'error' || engine.value === 'browser';
   for (const field of sessionFields) field.disabled = active;
   domainField.disabled = active;
   showMessage(message, phase === 'error');
@@ -63,13 +73,14 @@ function setPhase(next, message) {
 function renderCaptureStatus(status) {
   if (phase === 'stopping' || !status?.phase) return;
   if (phase === 'starting' && status.phase === 'idle') return;
-  setPhase(status.phase, ['error', 'starting', 'degraded'].includes(status.phase) ? status.message : '');
+  setPhase(status.phase, ['error', 'starting', 'degraded', 'capturing'].includes(status.phase) ? status.message : '');
 }
 
 function renderFields() {
   const browser = engine.value === 'browser';
-  for (const id of ['asr-domain-field', 'apikey-field']) $(id).hidden = !browser;
-  for (const id of ['server-field', 'token-field']) $(id).hidden = browser;
+  for (const id of ['apikey-field', 'vad-silence-field', 'vad-segment-field']) $(id).hidden = !browser;
+  $('asr-domain-field').hidden = !browser || domainMode.value !== 'manual';
+  for (const id of ['server-field', 'token-field', 'agent-field', 'service-note']) $(id).hidden = browser;
   const cache = $('model-cache-status');
   cache.hidden = !browser || !(cacheInfo?.saved || cacheInfo?.warning);
   cache.textContent = cacheInfo?.warning ? cacheInfo.message : cacheInfo?.saved ? '识别模型已缓存' : '';
@@ -86,6 +97,11 @@ function showPanel(captions) {
 }
 $('session-tab').addEventListener('click', () => showPanel(false));
 $('caption-tab').addEventListener('click', () => showPanel(true));
+fallback.addEventListener('click', () => {
+  engine.value = 'browser';
+  engine.dispatchEvent(new Event('change'));
+  setPhase('idle');
+});
 
 function focusRequiredField(field, message) {
   showPanel(false);
@@ -96,14 +112,19 @@ function focusRequiredField(field, message) {
 async function init() {
   const [[tab], store, capture] = await Promise.all([
     chrome.tabs.query({ active: true, currentWindow: true }),
-    chrome.storage.local.get(['jlsTarget', 'jlsServer', 'jlsEngine', 'jlsApiKey', 'jlsServerToken', 'jlsModelCache', 'jlsAsrDomain', 'jlsAsrPacks', 'jlsCaptionPrefs']),
+    chrome.storage.local.get([...settingKeys, 'jlsModelCache', 'jlsAsrDomain', 'jlsAsrPacks', 'jlsCaptionPrefs']),
     chrome.runtime.sendMessage({ type: 'jls:query' }).catch(() => null),
   ]);
   activeTab = tab;
   $('tab-title').textContent = tab?.title || tab?.url || '没有可用标签页';
   $('tab-title').title = $('tab-title').textContent;
   target.value = store.jlsTarget === 'en' ? 'en' : 'zh';
-  engine.value = store.jlsEngine === 'server' ? 'server' : 'browser';
+  engine.value = choice(store.jlsEngine, ['server', 'server-enhanced'], 'browser');
+  domainMode.value = choice(store.jlsDomainMode, ['auto', 'off'], 'manual');
+  contextTurns.value = choice(store.jlsContextTurns, ['3', '4', '5'], '1');
+  vadSilence.value = choice(store.jlsVadSilence, ['0.4', '0.6', '0.8'], '0.4');
+  vadSegment.value = choice(store.jlsVadSegment, ['8', '12', '16'], '12');
+  agentMode.value = choice(store.jlsAgentMode, ['on', 'off'], 'default');
   server.value = store.jlsServer || DEFAULT_SERVER;
   apiKey.value = store.jlsApiKey || '';
   serverToken.value = store.jlsServerToken || '';
@@ -131,10 +152,9 @@ async function init() {
   domainField.addEventListener('change', () => {
     chrome.storage.local.set({ jlsAsrPacks: selectedPacks() }).catch(() => {});
   });
-  const keys = ['jlsEngine', 'jlsTarget', 'jlsApiKey', 'jlsServer', 'jlsServerToken'];
   sessionFields.forEach((field, index) => field.addEventListener('change', () => {
-    chrome.storage.local.set({ [keys[index]]: field.value.trim() }).catch(() => {});
-    if (field === engine) renderFields();
+    chrome.storage.local.set({ [settingKeys[index]]: field.value.trim() }).catch(() => {});
+    if (field === engine || field === domainMode) renderFields();
     if (field === target) preview.update(prefs, target.value);
     if (phase === 'error') setPhase('idle');
   }));
@@ -150,6 +170,11 @@ startButton.addEventListener('click', async () => {
   const config = {
     tabId: activeTab.id, target: target.value, engine: engine.value, asrPacks: selectedPacks(),
     serverUrl: server.value.trim() || DEFAULT_SERVER, apiKey: apiKey.value.trim(), serverToken: serverToken.value.trim(),
+    domainMode: domainMode.value, pageTitle: domainMode.value === 'auto' ? activeTab.title : undefined,
+    contextTurns: Number(contextTurns.value),
+    vad: browser ? { minSilence: Number(vadSilence.value), maxSegment: Number(vadSegment.value) } : undefined,
+    localMode: browser ? undefined : engine.value === 'server-enhanced' ? 'enhanced' : 'fast',
+    agent: browser ? undefined : agentMode.value === 'on' || agentMode.value === 'default' && engine.value === 'server-enhanced',
   };
   if (browser && !config.apiKey) {
     focusRequiredField(apiKey, '请填写 DeepSeek API Key');
@@ -179,7 +204,8 @@ startButton.addEventListener('click', async () => {
     const response = await chrome.runtime.sendMessage({ type: 'jls:start', streamId, ...config });
     if (ticket !== operation) return;
     if (!response?.ok) throw new Error(response?.error || '启动失败');
-    setPhase('capturing');
+    const { jlsStatus } = await chrome.storage.session.get('jlsStatus');
+    if (ticket === operation) setPhase('capturing', jlsStatus?.phase === 'capturing' ? jlsStatus.message : '');
   } catch (error) {
     if (ticket === operation) setPhase('error', error.message || '无法开始字幕');
   }

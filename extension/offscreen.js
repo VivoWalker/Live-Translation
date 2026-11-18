@@ -62,6 +62,13 @@ function connect(capture, url, target, token, settings) {
       try { msg = JSON.parse(e.data); } catch { return; }
       if (msg.type === 'ready' && !settled) {
         settled = true; clearTimeout(timer);
+        const name = String(msg.asr || '').slice(0, 80);
+        const modeMismatch = settings.mode && msg.asr_mode && settings.mode !== msg.asr_mode;
+        const defaultMessage = name ? '本地识别模型 ' + name : '';
+        capture.notice = msg.asr_fallback_from ? '服务已回退到 ' + name
+          : modeMismatch ? (msg.asr_mode === 'fast' ? '服务当前提供本地快速模式' : '服务当前提供本地增强模式') + '（' + name + '）'
+            : defaultMessage;
+        if (settings.agent && !msg.agent?.enabled) capture.notice += '。服务未启用 Agent 复查';
         report(capture, 'connected', '已连接字幕服务（' + msg.asr + ' / ' + msg.translator + '）');
         resolve();
       }
@@ -81,6 +88,7 @@ function connect(capture, url, target, token, settings) {
 async function start(msg) {
   const old = active;
   const capture = { id: ++generation, sessionId: msg.sessionId, cancelled: false, engineStarted: false };
+  const local = msg.engine === 'server' || msg.engine === 'server-enhanced';
   capture.cancelledPromise = new Promise((_, reject) => {
     capture.cancelStart = () => reject(new DOMException('采集已取消', 'AbortError'));
   });
@@ -115,10 +123,12 @@ async function start(msg) {
     capture.source = capture.ctx.createMediaStreamSource(capture.stream);
     capture.node = new AudioWorkletNode(capture.ctx, 'pcm-tap', { numberOfInputs: 1, numberOfOutputs: 0,
       channelCount: 1, channelCountMode: 'explicit', processorOptions: { maxPendingBlocks: 20 } });
-    if (msg.engine === 'server') {
+    if (local) {
       const settings = msg.domainMode === 'auto' ? { domain: 'auto', page_title: msg.pageTitle }
         : msg.domainMode === 'off' ? { domain: 'off' } : {};
       if (msg.contextTurns !== undefined) settings.context_turns = msg.contextTurns;
+      if (msg.localMode !== undefined) settings.mode = msg.localMode;
+      if (typeof msg.agent === 'boolean') settings.agent = msg.agent;
       await connect(capture, msg.serverUrl || 'ws://127.0.0.1:8765/ws', msg.target || 'zh', msg.serverToken || '', settings);
       check(capture);
     } else {
@@ -127,7 +137,7 @@ async function start(msg) {
         if (!current(capture)) return;
         if (event.type === 'progress') report(capture, 'starting', event.message);
         else send(capture, event);
-      }, domainMode: msg.domainMode, pageTitle: msg.pageTitle, contextTurns: msg.contextTurns }), capture.cancelledPromise]);
+      }, domainMode: msg.domainMode, pageTitle: msg.pageTitle, contextTurns: msg.contextTurns, vad: msg.vad }), capture.cancelledPromise]);
       check(capture);
     }
     const audioStart = capture.ctx.currentTime;
@@ -145,7 +155,7 @@ async function start(msg) {
           const warning = buffered > SOCKET_WARN_BYTES;
           if (warning !== congested) {
             congested = warning;
-            report(capture, warning ? 'degraded' : 'capturing', warning ? '音频发送积压' : '正在接收页面声音');
+            report(capture, warning ? 'degraded' : 'capturing', warning ? '音频发送积压' : capture.notice);
           }
           capture.ws.send(data);
         } else if (capture.engineStarted) {
@@ -158,10 +168,10 @@ async function start(msg) {
       }
     };
     capture.source.connect(capture.node);
-    report(capture, 'capturing', '正在接收页面声音');
+    report(capture, 'capturing', capture.notice || '');
     capture.statsTimer = setInterval(() => {
       if (!current(capture)) return;
-      if (msg.engine === 'server' && capture.ws?.readyState === 1) capture.ws.send(JSON.stringify({ type: 'stats' }));
+      if (local && capture.ws?.readyState === 1) capture.ws.send(JSON.stringify({ type: 'stats' }));
       else if (capture.engineStarted) send(capture, JLSEngine.stats());
     }, 3000);
     capture.stream.getAudioTracks()[0].addEventListener('ended', () => {

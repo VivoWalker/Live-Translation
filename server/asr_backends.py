@@ -10,6 +10,7 @@ from .asr_domain import DomainCorrector
 
 
 class _LocalBackend(_OfflineRecognizer):
+    mode = "enhanced"
     partial_interval = 3.0
     min_partial_speech = 2.5
     default_cuda = "float16"
@@ -48,6 +49,7 @@ class _LocalBackend(_OfflineRecognizer):
 
 class ParakeetRecognizer(_LocalBackend):
     name = "parakeet-tdt-ctc-0.6b-ja"
+    mode = "fast"
     checkpoint = "parakeet-tdt_ctc-0.6b-ja.nemo"
     partial_transcription = True
 

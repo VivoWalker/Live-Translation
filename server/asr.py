@@ -150,6 +150,7 @@ class _OfflineRecognizer:
     """Serialize native inference across sessions sharing one model."""
 
     capabilities = Capabilities()
+    mode = "fast"
 
     def transcribe(self, audio: np.ndarray, context: RecognitionContext | None = None) -> str:
         return self.recognize(audio, context).text
