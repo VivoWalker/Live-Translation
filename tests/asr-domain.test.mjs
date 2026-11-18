@@ -38,8 +38,9 @@ test('every curated full alias has one canonical output and guarded aliases requ
   for (const [id, pack] of Object.entries(packs)) {
     const corrector = select([id]);
     for (const entry of pack.entries) for (const alias of entry.aliases) {
-      const cue = entry.requires ? pack.cues[entry.requires[0]][0] + '、' : '';
-      assert.equal(corrector.correct(cue + alias), cue + entry.term, alias);
+      const { text, requires = entry.requires } = typeof alias === 'string' ? { text: alias } : alias;
+      const cue = requires ? pack.cues[requires[0]][0] + '、' : '';
+      assert.equal(corrector.correct(cue + text), cue + entry.term, `${id}: ${text}`);
     }
   }
 });
@@ -56,10 +57,21 @@ test('malformed or oversized lexicons fail before use; no supplied pattern is ev
   assert.throws(() => create(data, 'unknown'));
   for (const invalid of [null, { ...data, version: 2 }, { ...data, entries: Array(501).fill(data.entries[0]) },
     { version: 1, cues: {}, entries: [{ term: '名前', scope: 'common', aliases: ['短'] }] },
+    { version: 1, cues: { cue: ['話題'] }, entries: [{ term: '名前', aliases: [{ text: 'ABC', requires: ['cue'], katakanaBoundary: true }] }] },
+    { version: 1, cues: {}, entries: [{ term: '名前', aliases: [{ text: '別名' }] }] },
     { version: 1, cues: {}, entries: [{ term: '名前', scope: 'common', aliases: ['誤名'], requires: ['missing'] }] }]) assert.throws(() => create(invalid));
   const pattern = create({ version: 1, cues: {}, entries: [{ term: '正しい名前', scope: 'common', aliases: ['(a+)+$'] }] });
   assert.equal(pattern.correct('a'.repeat(8000)), 'a'.repeat(8000));
   assert.equal(pattern.correct('(a+)+$'), '正しい名前');
+});
+
+test('an alias can override the entry context without allowing a cue across the match or sentence', () => {
+  const corrector = create({ version: 1, cues: { default: ['話題'], narrow: ['特集'] }, entries: [
+    { term: '標準名', aliases: ['別名', { text: '略名', requires: ['narrow'] }], requires: ['default'] },
+  ] });
+  assert.equal(corrector.correct('話題は別名、略名です。'), '話題は標準名、略名です。');
+  assert.equal(corrector.correct('略名の特集'), '標準名の特集');
+  assert.equal(corrector.correct('特略名集。特集。略名です。'), '特略名集。特集。略名です。');
 });
 
 test('long input and repeated sessions keep correction stateless and bounded', () => {

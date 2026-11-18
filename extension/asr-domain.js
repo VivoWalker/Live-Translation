@@ -5,6 +5,7 @@
   const PROFILES = ['off', 'anime', 'gakumas'];
   const MAX_ENTRIES = 500, MAX_TEXT = 8192, RADIUS = 24;
   const length = value => Array.from(value).length;
+  const katakana = char => !!char && /[ァ-ヺーヽヾ]/.test(char);
   function checkedString(value, minimum = 2) {
     return typeof value === 'string' && length(value) >= minimum && length(value) <= 80 &&
       value === value.trim() && !/[\u0000-\u001f\u007f]/.test(value);
@@ -26,19 +27,33 @@
       if (cues.size >= 16 || !Array.isArray(values) || values.length > 40 || !values.every(value => checkedString(value, 1))) throw new Error('识别词表上下文格式错误');
       cues.set(name, values);
     }
+    function context(requires) {
+      if (requires === undefined) return undefined;
+      if (!Array.isArray(requires) || !requires.length || requires.length > 16 || !requires.every(name => cues.has(name))) {
+        throw new Error('识别词表上下文格式错误');
+      }
+      return requires.flatMap(name => cues.get(name));
+    }
     const aliases = new Set(), terms = new Set(), rules = [];
     for (const entry of data.entries) {
       if (!entry || !checkedString(entry.term) || (entry.scope !== undefined && !['common', 'gakumas'].includes(entry.scope)) ||
-          !Array.isArray(entry.aliases) || entry.aliases.length > 12 || !entry.aliases.every(value => checkedString(value)) ||
-          (entry.requires !== undefined && (!Array.isArray(entry.requires) || !entry.requires.length || entry.requires.length > 16 || !entry.requires.every(c => cues.has(c))))) {
+          !Array.isArray(entry.aliases) || entry.aliases.length > 12) {
         throw new Error('识别词表条目格式错误');
       }
+      const entryCues = context(entry.requires);
       terms.add(entry.term);
-      for (const alias of entry.aliases) {
+      for (const value of entry.aliases) {
+        const plain = typeof value === 'string';
+        const { text: alias, requires, katakanaBoundary = false } = plain ? { text: value } : value || {};
+        if (!checkedString(alias) || (!plain && requires === undefined && !katakanaBoundary) || typeof katakanaBoundary !== 'boolean' ||
+            (katakanaBoundary && !Array.from(alias).every(katakana))) {
+          throw new Error('识别词表别名格式错误');
+        }
+        const aliasCues = requires === undefined ? entryCues : context(requires);
         if (alias === entry.term || aliases.has(alias)) throw new Error('识别词表存在重复别名');
         aliases.add(alias);
         if (profile !== 'off' && (profile === 'gakumas' || entry.scope !== 'gakumas')) {
-          rules.push({ alias, term: entry.term, cues: entry.requires?.flatMap(name => cues.get(name)) });
+          rules.push({ alias, term: entry.term, cues: aliasCues, katakanaBoundary });
         }
       }
     }
@@ -66,8 +81,7 @@
     const ruleIndex = index(rules, rule => rule.alias), termIndex = index(canonical, term => term);
     const latin = char => !!char && /[A-Za-z0-9_]/.test(char);
     const boundary = (text, offset, alias) => {
-      const before = Array.from(text.slice(0, offset)).at(-1), after = Array.from(text.slice(offset + alias.length))[0];
-      return !(latin(alias[0]) && latin(before)) && !(latin(alias.at(-1)) && latin(after));
+      return !(latin(alias[0]) && latin(text[offset - 1])) && !(latin(alias.at(-1)) && latin(text[offset + alias.length]));
     };
     return Object.freeze({ correct(text) {
       if (typeof text !== 'string' || !rules.length || length(text) > MAX_TEXT) return text;
@@ -79,9 +93,11 @@
         const protectedTerm = (termIndex.get(char) || []).find(term => text.startsWith(term, offset));
         const rule = (ruleIndex.get(char) || []).find(rule => {
           if (!text.startsWith(rule.alias, offset) || !boundary(text, offset, rule.alias)) return false;
+          const end = offset + rule.alias.length;
+          if (rule.katakanaBoundary && (katakana(text[offset - 1]) || katakana(text[end]))) return false;
           if (!rule.cues) return true;
-          const before = Array.from(text.slice(Math.max(0, offset - RADIUS * 2), offset)).slice(-RADIUS).join('');
-          const after = Array.from(text.slice(offset + rule.alias.length, offset + rule.alias.length + RADIUS * 2)).slice(0, RADIUS).join('');
+          const before = Array.from(text.slice(Math.max(0, offset - RADIUS * 2), offset)).slice(-RADIUS).join('').split(/[。\r\n]/).at(-1);
+          const after = Array.from(text.slice(end, end + RADIUS * 2)).slice(0, RADIUS).join('').split(/[。\r\n]/, 1)[0];
           return rule.cues.some(cue => before.includes(cue) || after.includes(cue));
         });
         if (protectedTerm && (!rule || protectedTerm.length >= rule.alias.length)) { result += protectedTerm; offset += protectedTerm.length; }

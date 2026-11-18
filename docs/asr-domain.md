@@ -28,15 +28,33 @@ python -m server.app --asr-packs
 
 词条随应用打包，运行时在本地匹配。Python 的日语词库在 `language=ja` 时生效。
 
-## 范围与误改控制
+## 覆盖范围
 
-首批人工整理了 169 个词条、448 个别名，重点为陽高真白、学マス角色/出演者，以及 BanG Dream!（含 MyGO!!!!!、Ave Mujica）、Love Live! 的部分团体、出演者和歌曲。包括完整姓名读音的平假名/片假名写法与部分常见同音异字。它不是完整节目/歌曲目录，也没有自动更新；词条和推测别名不等于从真实直播测得的错误频率。
+五套词库共 453 个不同词条、1,367 种不同识别写法。部分相关词条共用，例如十王星南同时出现在陽高真白与学マス词库中。
 
-例如 `日高真白さん` → `陽高真白さん`，`秦谷みすず` → `秦谷美鈴`，`高松灯` → `高松燈`。不从单独的 `ましろ`、`ひろ`、`ことね` 等短名推断完整姓名，也不做全句模糊匹配。
+| 词库 | 示例 |
+| --- | --- |
+| 陽高真白 | `ひたかましろ` → `陽高真白`。包含十王星南、桃尻芹香和「陽高真白はぽじてぃぶ☆ぷりんせす」「おうちとれーにんぐっ！」 |
+| 学マス | `学馬` → `学マス`，`がくま水曜日` → `学マ水曜日`，有系列线索时 `エヌアイエー` → `N.I.A`。覆盖初星学園HR、角色与出演者、育成用语及歌曲 |
+| BanG Dream! | `ぽぴぱ` → `ポピパ`、`ぱすぱれ` → `パスパレ`、`がるぱ` → `ガルパ`。包含 MyGO!!!!!、Ave Mujica 等乐队、出演者和歌名 |
+| Love Live! | `にじがく` → `ニジガク`、`りんくら` → `リンクラ`、`セイハス` → `せーはす`。覆盖虹ヶ咲、蓮ノ空等团体、角色和歌名 |
+| 通用声优与动画 | `めんげん` → `メン限`、`りあたい` → `リアタイ`。包含声优姓名、动画曲名及直播和活动用语 |
 
-`白線`、`光景`、`Campus mode!!` 以及 `Aqours` 等容易与普通词混淆的条目需要邻近语境：只查看原始假设中别名前后各 24 个 Unicode 字符，且不把别名自身算作证据。因此 `次の曲ははくせん` 会规范为 `次の曲は白線`，`はくせんの外側で待つ` 不变；`ラブライブのアクア` 可变为 `ラブライブのAqours`，`アクアを買った` 不变。规则不会从前一句积累证据来强行改写下一句。
+## 误改控制
 
-匹配只扫描原始文本，先匹配最长别名，保护已有的完整标准名和英文词边界，不循环替换。即使有语境保护，同音的真实人名/歌曲仍可能误判；遇到不适用的节目可以关闭，或删除/收紧对应别名。
+纠错按原始识别文本从左到右匹配，优先处理完整的长别名，并保护已有的标准写法。易混别名查看同一句中前后各 24 个 Unicode 字符，遇到 `。` 或换行截断。两侧分别匹配，别名本身和之前的分段均不提供线索。
+
+`バンドリのラス` 可以校正为 `バンドリのRAS`。`クラス` 和 `ラスト` 通过片假名边界检查保留原样。`学マスのテマリちゃん` 可以校正为 `学マスの手毬ちゃん`。单独出现的 `ましろ`、`ひろ`、`ことね` 会保留原样。在不熟悉的节目中可以只勾选相关词库，减小同音名字的误改范围。
+
+## 资料来源
+
+通过 GitHub 公开检索核对标准写法、简称和姓名读音，识别异体仍由本项目人工整理。
+
+- 陽高真白的读音、十王星南的出演关系、节目日历和桃尻芹香的角色曲。 [Gakumas_dic](https://github.com/reindex-ot/Gakumas_dic/blob/15e9438f2505abb246be7cba954f5eba2a344c59/Gakumas_dic_Gboard.txt) · [imasparql](https://github.com/imas/imasparql/blob/master/RDFs/Gakuen.rdf) · [出演日历](https://github.com/IvanChan1129/gakumas-calendar-ics/blob/b49d4fab613e6c49f1bea2cc525610ac35390916/casts/cast-1acc688e5b3a308f.ics) · [曲目资料](https://github.com/onihusube/ensonglog/tree/a0b3cba42e6f432304110cf7bdcf0bf9882be073/docs/2025)
+- 学マス的角色、育成和生放送用语，以及氷渡香名江与 H.I.F 的写法。 [gakumas-data](https://github.com/surisuririsu/gakumas-tools/tree/master/packages/gakumas-data) · [角色资料](https://github.com/fuga-if/idol-live-db/blob/bf800a0daf4f7d182806cdf072c41bc608c14264/data/_applied/idols/20261108_gakuen_hiwatari_kanae.json) · [初星学園HR](https://github.com/Velgail/imas_llm_news/blob/97be57d96136c4847500b8fa72da97c56b4a27dc/docs/_posts/2026/08/2026-08-13-gaku-hr11-broadcast-today.md) · [H.I.F](https://github.com/Velgail/imas_llm_news/blob/97be57d96136c4847500b8fa72da97c56b4a27dc/docs/_posts/2026/06/2026-06-06-gakumas-garakuta-single-release.md)
+- BanG Dream! 乐队、演员、角色、通称及 MyGO!!!!! 歌名读音。 [Open Bandori Database](https://github.com/BANKA2017/open-bandori-database) · [乐队简称](https://github.com/haneoka-gakuen/haneoka/blob/b5e39264ca144811d9fd619715106688495245b6/src/lib/catalog-query-aliases.json) · [MyGO!!!!! 曲目读音](https://github.com/takaki719/mygo-quiz/blob/b74a308f664a286dcbf2a51945ea4776d0f26e2b/data/songs.ts)
+- Love Live! 的团体、曲目、角色读音与蓮ノ空简称。 [TakasakiInfo](https://github.com/AuroraCaelum/TakasakiInfo) · [蓮ノ空词条](https://github.com/moganbo/IME/blob/d3a8cfb634cbb1155ef2a3f68d7e8857a741421f/live_live_hasunosora/lovelive_hasunosora.txt) · [せーはす](https://github.com/AuroraCaelum/sehasu-counter)
+- 通用词库中的部分声优和动画歌曲，包括《ぼっち・ざ・ろっく！》的出演者和「青春コンプレックス」。 [动画资料](https://github.com/open-ani/animeko/blob/42ef5d4616bb64f4530ebb56247f7847c3329da8/app/shared/ui-subject/src/commonMain/kotlin/ui/subject/details/SubjectDetailsTestData.kt) · [歌曲资料](https://github.com/czy0729/Bangumi-Subject/blob/b27311eb0f7d54b329e134c095879a273b3189c4/data/4009/400957.json)
 
 ## 添加实测词条
 
@@ -45,15 +63,16 @@ python -m server.app --asr-packs
 ```json
 {
   "version": 1,
-  "cues": {"song": ["曲", "歌", "ライブ"]},
+  "cues": {"song": ["曲", "歌", "ライブ"], "bandori": ["バンドリ", "ガルパ"]},
   "entries": [
     {"term": "陽高真白", "scope": "common", "aliases": ["日高真白", "ひだかましろ"]},
-    {"term": "白線", "scope": "gakumas", "aliases": ["はくせん"], "requires": ["song"]}
+    {"term": "白線", "scope": "gakumas", "aliases": ["はくせん"], "requires": ["song"]},
+    {"term": "RAS", "aliases": [{"text": "ラス", "requires": ["bandori"], "katakanaBoundary": true}]}
   ]
 }
 ```
 
-`scope` 是旧版自定义词库的选填字段，取值为 `common` 或 `gakumas`。`requires` 中的语境组满足任意一个即可，省略表示无语境限制。所有别名和提示词按字面匹配。以实际识别结果添加明确的别名，核对标准写法并补上正例和反例。
+`scope` 是旧版自定义词库的选填字段，取值为 `common` 或 `gakumas`。`requires` 中任一组的任一线索匹配即可。别名可以用字符串继承词条条件，也可以用对象为某个写法指定自己的 `requires`。全片假名别名可设置 `katakanaBoundary: true`，避免匹配在更长的片假名词中。所有别名和提示词均按字面匹配。以实际识别结果添加明确的别名，核对标准写法并补上正例和反例。
 
 词表最多 500 条，每条最多 12 个别名，每个名称/别名 2–80 个 Unicode 字符；上下文组最多 16 组，每组最多 40 个提示词。文件最多 256 KiB，超过 8192 个字符的识别结果跳过纠错。重复别名、缺失上下文组和格式错误会拒绝加载；没有逐句缓存、会话历史或台词日志增长。
 

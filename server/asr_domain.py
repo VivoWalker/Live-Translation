@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 PROFILES = ("off", "anime", "gakumas")
@@ -9,6 +10,8 @@ PACKS = ("mashiro", "gakumas", "bandori", "lovelive", "general")
 BUILTIN = Path(__file__).resolve().parent.parent / "extension" / "asr-terms"
 MAX_BYTES = 256 * 1024
 RADIUS = 24
+SENTENCE_BREAK = re.compile(r"[。\r\n]")
+KATAKANA = re.compile(r"[ァ-ヺーヽヾ]+")
 
 
 def normalize_packs(selection: str | list[str]) -> tuple[str, ...]:
@@ -46,26 +49,40 @@ def _read(path: Path, profile: str = "gakumas"):
     for values in cues.values():
         if not isinstance(values, list) or len(values) > 40 or not all(_string(value, 1) for value in values):
             raise ValueError("Invalid ASR lexicon cues")
+
+    def context(requires):
+        if (not isinstance(requires, list) or not 1 <= len(requires) <= 16
+                or not all(isinstance(name, str) and name in cues for name in requires)):
+            raise ValueError("Invalid ASR lexicon cues")
+        return tuple(cue for name in requires for cue in cues[name])
+
     aliases, terms, rules = set(), set(), []
     for entry in data["entries"]:
         if (not isinstance(entry, dict) or not _string(entry.get("term"))
                 or entry.get("scope", "common") not in ("common", "gakumas")
-                or not isinstance(entry.get("aliases"), list) or len(entry["aliases"]) > 12
-                or not all(map(_string, entry["aliases"]))):
+                or not isinstance(entry.get("aliases"), list) or len(entry["aliases"]) > 12):
             raise ValueError("Invalid ASR lexicon entry")
-        requires = entry.get("requires", [])
-        if ("requires" in entry and (not isinstance(requires, list) or not 1 <= len(requires) <= 16
-                or not all(isinstance(name, str) and name in cues for name in requires))):
-            raise ValueError("Invalid ASR lexicon cues")
-        context = tuple(cue for name in requires for cue in cues[name]) if requires else None
+        entry_cues = context(entry["requires"]) if "requires" in entry else None
         term = entry["term"]
         terms.add(term)
-        for alias in entry["aliases"]:
+        for value in entry["aliases"]:
+            if isinstance(value, dict):
+                alias = value.get("text")
+                alias_cues = context(value["requires"]) if "requires" in value else entry_cues
+                katakana_boundary = value.get("katakanaBoundary", False)
+                if "requires" not in value and katakana_boundary is not True:
+                    raise ValueError("Invalid ASR lexicon alias")
+            else:
+                alias, alias_cues = value, entry_cues
+                katakana_boundary = False
+            if (not _string(alias) or not isinstance(katakana_boundary, bool)
+                    or (katakana_boundary and not KATAKANA.fullmatch(alias))):
+                raise ValueError("Invalid ASR lexicon alias")
             if alias == term or alias in aliases:
                 raise ValueError("Duplicate ASR lexicon alias")
             aliases.add(alias)
             if profile != "off" and (profile == "gakumas" or entry.get("scope") != "gakumas"):
-                rules.append((alias, term, context))
+                rules.append((alias, term, alias_cues, katakana_boundary))
     if terms.intersection(aliases):
         raise ValueError("ASR lexicon cannot cascade replacements")
     return terms, rules
@@ -83,7 +100,7 @@ class DomainCorrector:
         terms = set().union(*(terms for terms, _ in sources))
         self.rules = sorted((rule for _, rules in sources for rule in rules), key=lambda rule: -len(rule[0]))
         targets = {}
-        for alias, term, _ in self.rules:
+        for alias, term, _, _ in self.rules:
             if targets.setdefault(alias, term) != term:
                 raise ValueError("Conflicting ASR lexicon alias across packs")
         if terms.intersection(targets):
@@ -106,15 +123,18 @@ class DomainCorrector:
         while offset < len(text):
             protected = next((term for term in self.term_index.get(text[offset], ()) if text.startswith(term, offset)), None)
             match = None
-            for alias, term, cues in self.rule_index.get(text[offset], ()):
+            for alias, term, cues, katakana_boundary in self.rule_index.get(text[offset], ()):
                 if not text.startswith(alias, offset):
                     continue
                 end = offset + len(alias)
-                if (self._latin(alias[0]) and self._latin(text[max(0, offset - 1):offset])
-                        or self._latin(alias[-1]) and self._latin(text[end:end + 1])):
+                left, right = text[max(0, offset - 1):offset], text[end:end + 1]
+                if self._latin(alias[0]) and self._latin(left) or self._latin(alias[-1]) and self._latin(right):
+                    continue
+                if katakana_boundary and (KATAKANA.fullmatch(left) or KATAKANA.fullmatch(right)):
                     continue
                 if cues is not None:
-                    before, after = text[max(0, offset - RADIUS):offset], text[end:end + RADIUS]
+                    before = SENTENCE_BREAK.split(text[max(0, offset - RADIUS):offset])[-1]
+                    after = SENTENCE_BREAK.split(text[end:end + RADIUS], maxsplit=1)[0]
                     if not any(cue in before or cue in after for cue in cues):
                         continue
                 match = (alias, term)
