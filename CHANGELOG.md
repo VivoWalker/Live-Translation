@@ -1,26 +1,30 @@
 # Changelog
 
-这里按扩展版本记录主要行为变化，不代表已经发布独立安装包。安装与更新方式见 [README](README.md)。
+这里按扩展版本记录主要行为变化。安装与更新步骤、预发布制品及校验文件见项目页面。 [README](README.md) · [GitHub Releases](https://github.com/VivoWalker/Live-Translation/releases)
 
 ## Unreleased
 
-- GitHub Actions 持续执行 Python、JavaScript 和轻量 Chromium 回归。通过检查的版本标签生成带 SHA-256 的扩展安装制品。
-- 复查按模型与实际推理耗时调整预算和频率。CPU Turbo 与 Qwen 默认走离线修订，直播超时后保留主结果并独立记录耗时和回退。
-- 日语专名区分安全、语境与候选证据。节目匹配优先唯一核验节目及企划，标题未知时可选保守回退。
-- 人工审核新增录音组、PCM 摘要、独立留出 CER、Entity F1、拒绝历史、批准记录和有出处的训练索引。
-- Benchmark 支持来源和音频摘要校验、五组流式对照、Mock WebSocket 和定期加速压测。修复迟到预览、发送背压和重启清屏竞争。
-- 扩展确认实际本地模型和第二模型可用性。浏览器可在未填 DeepSeek Key 时显示日语。翻译端点拒绝重定向。
+## 0.4.5 · 实验预发布（2026-11-18）
 
-- 浏览器与本地服务都按分段 ID 保留连续发言的翻译任务，支持有界并发和乱序回填。翻译快照在日语 final 产生时固定，队列满、超时和语言切换均有分段状态。
-- WebSocket 优先交付最终字幕、译文和错误。音频积压会降频预览或提示重新开始。Silero 可调整静音时长、强制切分及可选的边界重叠，默认保留原参数。
-- 可选本地模型新增 Parakeet 日语、Whisper Large V3 Turbo 和 Qwen3-ASR。服务报告模型能力和启动回退状态，最终识别优先于尚未开始的预览。
-- 节目词表可按标签页标题选择相关词包。本地可配置自定义节目目录，已核验的语料携带来源和可审计的纠错记录。
-- 可选本地 Agent 按风险选择复查，超时回退到主模型。可启用 SQLite 审核，使用命令行接受、拒绝及在独立文本上验证规则。
-- 可选多轮日语翻译上下文与中英译名词表。按当前语言、历史、节目与译名版本区分翻译缓存。演示页等待目标语言配置确认后恢复译文回填。
-- 提供可选录播说话人分离命令，输出匿名说话人和重叠区间，可为转写字幕附加说话人标签。
-- 增加本地数据清单、ASR A/B、Silero 参数扫描、译文与说话人评价，以及 WebSocket 端到端延迟和丢失统计。
-- 弹窗提供浏览器、本地快速、本地增强模式，以及领域上下文、分段和 Agent 选项。显示服务实际模型、回退和未启用能力。
-- 默认令牌存入本机文件。远程音频需要独立授权与 WSS。服务缺少翻译 Key 时输出日语字幕，公共翻译可显式启用。
+### 识别与审核
+
+- 可选本地模型新增日语 Parakeet、Whisper Large V3 Turbo 与 Qwen3-ASR。弹窗显示客户端请求、服务实际模型、回退及第二模型可用性。浏览器默认使用 SenseVoice WASM，留空 DeepSeek Key 可显示日语原文。 [模型选择](docs/model-comparison.md)
+- 本地 Agent 按片段、模型耗时和积压选择二次识别。复查超时保留主结果，原生推理完成后释放槽位。CPU Turbo 与 Qwen3-ASR 默认用于离线修订，离线工具支持独立模型比较。 [复查与审核](docs/agentic-asr.md)
+- 日语专名按安全别名、上下文和候选证据处理。自动模式优先匹配已核验节目与企划，未匹配时可选保守回退。本地可加载自定义节目目录。 [领域词表](docs/asr-domain.md)
+- SQLite 审核记录 PCM 摘要、录音组和人工参考。规则提案在独立留出集上报告 CER 与 Entity F1，经过人工批准后发布。支持持久化拒绝、备份和人工标签索引。
+- 新增可选的录播说话人分离命令，输出匿名说话人及重叠区间。 [本地服务](docs/local-service.md)
+
+### 字幕、翻译与隐私
+
+- 浏览器与本地服务按分段 ID 回填乱序译文，修复迟到预览覆盖、WebSocket 发送积压和重启清屏竞争。Silero 可调整静音时长、强制切分和边界重叠。
+- 可选多轮日语上下文与中英译名词表。翻译快照在 final 时固定，缓存按目标语言、会话上下文和词表版本区分。翻译请求拒绝 HTTP 重定向。
+- 访问令牌保存在本机文件。远程音频要求 WSS 和独立授权。本地服务可显式选择公共翻译端点。 [翻译与用量](docs/translation.md)
+
+### 验证与制品
+
+- GitHub Actions 执行 Python、JavaScript、Chromium 和 Mock WebSocket 检查，并定期运行加速压测。扩展 ZIP 随 SHA-256 校验文件发布。 [下载实验版](https://github.com/VivoWalker/Live-Translation/releases/tag/v0.4.5)
+- 云端验收通过 114 项 Python、75 项 JavaScript 和 22 项 Chromium 页面、资源与真实 WASM 检查。同一段合成音频的两线程 CPU RTF 为 SenseVoice 0.0673、Whisper Base 0.2364。真实 SenseVoice 的五组流式对照交付 10/10 条 Mock 译文。60 分钟音频量的加速 Mock 压测交付 3,993/3,993 条。 [测量条件与完整数据](docs/phase2-validation.md)
+- Benchmark v2 清单校验音频摘要和标注来源，支持五组流式对照、Silero 参数扫描及译文和说话人评估。目标直播准确率、真实复查收益、CUDA / 显存与完整工具栏采集留待对应环境验收。 [Benchmark](docs/benchmark.md) · [Windows / RTX 验收](docs/local-validation.md)
 
 ## 0.4.4
 
