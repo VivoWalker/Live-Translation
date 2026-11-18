@@ -876,6 +876,25 @@ test('changing ASR domain cancels old translation and starts with clean context 
   } finally { context.api.stop(); }
 });
 
+test('browser opt-in translation history is bounded and uses a separate target glossary', async () => {
+  const context = engine();
+  await context.api.init({ ...context.config, contextTurns: 3, domainMode: 'auto', pageTitle: '初星学園HR' });
+  try {
+    for (const text of ['古い句', '第一句', '藤田ことね', '第三句', 'そうなの？']) await translatedUtterance(context, text);
+    const user = request => JSON.parse(JSON.parse(request.options.body).messages[1].content);
+    const chinese = user(context.requests.at(-1));
+    assert.deepEqual(chinese.history, ['第一句', '藤田ことね', '第三句']);
+    assert.equal(chinese.glossary['藤田ことね'], '藤田琴音');
+    assert.equal(chinese.episode, '初星学園HR');
+    context.api.setConfig({ target: 'en' });
+    await translatedUtterance(context, '藤田ことね');
+    const english = user(context.requests.at(-1));
+    assert.deepEqual(english.history, []);
+    assert.equal(english.glossary['藤田ことね'], 'Kotone Fujita');
+    assert.equal(context.events.filter(e => e.type === 'final').at(-1).text, '藤田ことね');
+  } finally { context.api.stop(); }
+});
+
 test('browser auto domain filters unrelated packs and a fresh session restores manual mode', async () => {
   const context = engine();
   await context.api.init({ ...context.config, domainMode: 'auto', pageTitle: '初星学園ＨＲ' });

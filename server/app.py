@@ -38,6 +38,7 @@ sys.path.insert(0, str(ROOT))
 from server.asr import BackendUnavailable, Capabilities, PROVIDERS, Recognizer, create_recognizer  # noqa: E402
 from server.asr_agent import OptimizationAgent  # noqa: E402
 from server.asr_review import ReviewStore  # noqa: E402
+from server.conversation import CONTEXT_WINDOWS, Glossary  # noqa: E402
 from server.asr_router import DecodeScheduler, select_recognizer  # noqa: E402
 from server.asr_domain import PACKS, PROFILES, normalize_packs  # noqa: E402
 from server.episodes import EpisodeCatalog  # noqa: E402
@@ -59,6 +60,7 @@ class AppState:
         fallback_from: str | None = None, episodes: EpisodeCatalog | None = None,
         agent_enabled: bool = False, secondary: Recognizer | None = None, agent_budget_ms: int = 450,
         review: ReviewStore | None = None,
+        context_turns: int = 1, glossary: Glossary | None = None,
     ):
         self.asr = asr
         self.translator = translator
@@ -70,6 +72,8 @@ class AppState:
         self.secondary = secondary
         self.agent_budget_ms = agent_budget_ms
         self.review = review
+        self.context_turns = context_turns
+        self.glossary = glossary or Glossary.load()
         self.fallback_from = fallback_from
         self.episodes = episodes or EpisodeCatalog()
         self.capabilities = asdict(getattr(asr, "capabilities", Capabilities()))
@@ -150,7 +154,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
             await ws.close(code=1008, message=b"Access token required")
             return ws
 
-        cfg = SessionConfig(vad=state.vad)
+        cfg = SessionConfig(vad=state.vad, context_turns=state.context_turns, glossary=state.glossary)
 
         def emit(event):
             out.put(event)
@@ -208,7 +212,10 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                         await session.set_target(target)
                         if domain is not None:
                             session.set_domain(domain)
+                        if "context_turns" in data:
+                            session.set_context_turns(data["context_turns"])
                         out.put({"type": "config", "ok": True, "target": target,
+                                 "context_turns": cfg.context_turns,
                                  **({"domain": domain.public()} if domain else {})})
                     elif kind == "ping":
                         out.put({"type": "pong", "t": time.time()})
@@ -346,6 +353,8 @@ def main() -> int:
     lexicon.add_argument("--asr-domain", choices=PROFILES, help="Legacy ASR lexicon profile")
     ap.add_argument("--asr-terms", default=cfg.get("asr_terms"), help="Custom ASR lexicon JSON, replaces built-in terms")
     ap.add_argument("--episode-catalog", default=cfg.get("episode_catalog"), help="Local episode metadata JSON")
+    ap.add_argument("--context-turns", type=int, choices=CONTEXT_WINDOWS, default=cfg.get("context_turns", 1))
+    ap.add_argument("--translation-glossary", default=cfg.get("translation_glossary"))
     ap.add_argument("--agent", action=argparse.BooleanOptionalAction, default=cfg.get("agent", False))
     ap.add_argument("--agent-secondary", choices=PROVIDERS, default=cfg.get("agent_secondary"))
     ap.add_argument("--agent-model-dir", default=cfg.get("agent_model_dir"))
@@ -368,6 +377,7 @@ def main() -> int:
             raise ValueError("Agent budget must be between 100 and 1500 ms")
         vad = VadSettings(args.vad_min_silence, args.vad_max_segment, args.vad_overlap)
         episodes = EpisodeCatalog(args.episode_catalog)
+        glossary = Glossary.load(args.translation_glossary)
         asr, fallback_from = select_recognizer(args.asr, model_dir=args.model_dir, language="ja",
                                                num_threads=args.threads, asr_domain=selection, asr_terms=args.asr_terms,
                                                device=args.asr_device, precision=args.asr_precision,
@@ -393,7 +403,8 @@ def main() -> int:
     state = AppState(asr, translator, access_token=os.environ.get("JLSUBS_ACCESS_TOKEN") or cfg.get("access_token"),
                      allowed_hosts=LOCAL_HOSTS | set(args.allow_host), vad=vad, fallback_from=fallback_from,
                      episodes=episodes, agent_enabled=args.agent, secondary=secondary,
-                     agent_budget_ms=args.agent_budget_ms, review=review)
+                     agent_budget_ms=args.agent_budget_ms, review=review, context_turns=args.context_turns,
+                     glossary=glossary)
     active_packs = ("custom" if selection != "off" else "off") if args.asr_terms else ",".join(normalize_packs(selection)) or "off"
     print(f"[jls] asr={asr.name} threads={args.threads} asr_packs={active_packs} translator={translator.engine}")
     if fallback_from:

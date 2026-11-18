@@ -118,6 +118,7 @@ async function start(msg) {
     if (msg.engine === 'server') {
       const settings = msg.domainMode === 'auto' ? { domain: 'auto', page_title: msg.pageTitle }
         : msg.domainMode === 'off' ? { domain: 'off' } : {};
+      if (msg.contextTurns !== undefined) settings.context_turns = msg.contextTurns;
       await connect(capture, msg.serverUrl || 'ws://127.0.0.1:8765/ws', msg.target || 'zh', msg.serverToken || '', settings);
       check(capture);
     } else {
@@ -126,7 +127,7 @@ async function start(msg) {
         if (!current(capture)) return;
         if (event.type === 'progress') report(capture, 'starting', event.message);
         else send(capture, event);
-      }, domainMode: msg.domainMode, pageTitle: msg.pageTitle }), capture.cancelledPromise]);
+      }, domainMode: msg.domainMode, pageTitle: msg.pageTitle, contextTurns: msg.contextTurns }), capture.cancelledPromise]);
       check(capture);
     }
     const audioStart = capture.ctx.currentTime;

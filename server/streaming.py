@@ -21,6 +21,7 @@ from .asr import Capabilities, Recognition, RecognitionContext, SAMPLE_RATE, Sil
 from .asr_agent import Action, OptimizationAgent
 from .asr_review import ReviewStore
 from .asr_router import DecodeScheduler
+from .conversation import CONTEXT_WINDOWS, ConversationContext, ConversationSnapshot, Glossary
 from .episodes import DomainSelection
 from .text import normalize_ja, stable_prefix, trim_overlap
 from .translate import TranslationPipeline
@@ -57,6 +58,8 @@ class SessionConfig:
     source_lang: str = "ja"
     vad: VadSettings = VadSettings()
     domain: DomainSelection | None = None
+    context_turns: int = 1
+    glossary: Glossary = Glossary()
 
 
 @dataclass
@@ -138,7 +141,7 @@ class StreamSession:
         self._last_partial_total = 0
         self._last_hyp = ""
         self._last_text = ""
-        self.previous_final_japanese = ""
+        self.conversation = ConversationContext()
         self.last_translated_segment: int | None = None
         self._last_decode_ms = 0.0
         self._translations: dict[int, asyncio.Task] = {}
@@ -187,7 +190,7 @@ class StreamSession:
         if isinstance(self.translator, TranslationPipeline):
             await self.translator.close()
         self._translations.clear()
-        self.previous_final_japanese = ""
+        self.conversation.clear()
         self.last_translated_segment = None
         while not self._q.empty():
             self._q.get_nowait()
@@ -240,6 +243,10 @@ class StreamSession:
         await self._maybe_preview(start + consumed)
 
     # ---------------------------------------------------------------- ASR/MT
+    @property
+    def previous_final_japanese(self) -> str:
+        return self.conversation.previous
+
     def _recognition_context(self) -> RecognitionContext:
         domain = self.cfg.domain
         return RecognitionContext(self.previous_final_japanese,
@@ -278,9 +285,16 @@ class StreamSession:
             self.cfg.domain = selection
             self._reset_translations()
 
+    def set_context_turns(self, turns: int) -> None:
+        if type(turns) is not int or turns not in CONTEXT_WINDOWS:
+            raise ValueError("Invalid translation context size")
+        if self.cfg.context_turns != turns:
+            self.cfg.context_turns = turns
+            self._reset_translations()
+
     def _reset_translations(self) -> None:
         self.translation_epoch += 1
-        self.previous_final_japanese = ""
+        self.conversation.clear()
         self.last_translated_segment = None
         if isinstance(self.translator, TranslationPipeline):
             self.translator.reset()
@@ -298,7 +312,7 @@ class StreamSession:
     def agent_stats(self) -> dict:
         return dict(self.agent.counts) if self.agent else {}
 
-    async def _translate(self, seg_id: int, text: str, target: str, context: str, epoch: int,
+    async def _translate(self, seg_id: int, text: str, target: str, context: str | ConversationSnapshot, epoch: int,
                          deadline: float) -> None:
         try:
             async with asyncio.timeout_at(deadline), self._translation_slots:
@@ -337,8 +351,9 @@ class StreamSession:
         if self._closed or seg_id <= self._last_submitted_id:
             return
         self._last_submitted_id = seg_id
-        context = self.previous_final_japanese
-        self.previous_final_japanese = text
+        context = self.conversation.snapshot(text, self.cfg.target_lang, self.cfg.context_turns,
+                                             self.cfg.glossary, self.cfg.domain)
+        self.conversation.remember(text)
         if len(self._translations) >= MAX_TRANSLATIONS:
             self.stats.translation_overflows += 1
             self.stats.translation_failures += 1

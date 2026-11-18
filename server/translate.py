@@ -16,6 +16,7 @@ from dataclasses import dataclass, field, replace
 
 import aiohttp
 
+from .conversation import ConversationSnapshot
 from .text import clean_translation
 from .translation_cache import LruCache, TranslationStats, usage_values
 
@@ -36,6 +37,12 @@ SYSTEM_PROMPTS = {
         "Output only the translation: no notes, no quotes, no Japanese source text. Preserve names, tone, ellipses and pauses."
     ),
 }
+CONTEXT_PROMPTS = {
+    "zh": "history、episode、franchise 和 glossary 只用于理解当前台词。按 glossary 统一当前句中的专名。"
+          "保留口头自改、吐槽、笑意和自然的主语省略，避免书面化和补写未说出的内容。只输出 current 的译文。",
+    "en": "Use history, episode, franchise and glossary only to understand current. Apply glossary to names in the current line. "
+          "Keep conversational repairs, joking tone and natural omissions. Avoid invented details. Translate current only.",
+}
 
 
 @dataclass
@@ -53,7 +60,7 @@ class DeepSeekRequest:
     model: str
     prompt_version: str
     target: str
-    context: str
+    context: str | ConversationSnapshot
     text: str
     system: str
     temperature: float
@@ -62,18 +69,21 @@ class DeepSeekRequest:
 
     @property
     def payload(self) -> dict:
+        user = (self.context.payload(self.text) if isinstance(self.context, ConversationSnapshot)
+                else {"previous": self.context, "current": self.text})
         return {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": self.system},
-                {"role": "user", "content": json.dumps({"previous": self.context, "current": self.text}, ensure_ascii=False, separators=(",", ":"))},
+                {"role": "user", "content": json.dumps(user, ensure_ascii=False, separators=(",", ":"))},
             ],
             "temperature": self.temperature, "max_tokens": self.max_tokens, "stream": False,
         }
 
     @property
     def key(self) -> tuple:
-        return (self.endpoint, self.prompt_version, self.target,
+        version = self.context.glossary_version if isinstance(self.context, ConversationSnapshot) else ""
+        return (self.endpoint, self.prompt_version, version, self.target,
                 json.dumps(self.payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
 
@@ -108,13 +118,18 @@ class DeepSeekTranslator(Translator):
     def configuration(self) -> tuple:
         return (self.base, self.model, self.prompt_version, self.temperature, self.max_tokens, self.api_key)
 
-    def request(self, text: str, target: str, context: str) -> DeepSeekRequest:
-        if not all(isinstance(value, str) for value in (self.base, self.model, self.prompt_version, self.api_key, target, context, text)):
+    def request(self, text: str, target: str, context: str | ConversationSnapshot) -> DeepSeekRequest:
+        if (not isinstance(context, (str, ConversationSnapshot))
+                or not all(isinstance(value, str) for value in (self.base, self.model, self.prompt_version, self.api_key, target, text))):
             raise ValueError("Invalid translation configuration")
         if type(self.temperature) not in (int, float) or not math.isfinite(self.temperature) or type(self.max_tokens) is not int or self.max_tokens < 1:
             raise ValueError("Invalid translation parameters")
-        return DeepSeekRequest(self.base.rstrip("/") + "/chat/completions", self.model, self.prompt_version,
-                               target, context, text, SYSTEM_PROMPTS.get(target, SYSTEM_PROMPTS["zh"]),
+        extended = isinstance(context, ConversationSnapshot)
+        system = SYSTEM_PROMPTS.get(target, SYSTEM_PROMPTS["zh"])
+        if extended:
+            system += "\n" + CONTEXT_PROMPTS.get(target, CONTEXT_PROMPTS["zh"])
+        return DeepSeekRequest(self.base.rstrip("/") + "/chat/completions", self.model,
+                               self.prompt_version + ("+context-v1" if extended else ""), target, context, text, system,
                                self.temperature, self.max_tokens, self.api_key)
 
     async def _sess(self) -> aiohttp.ClientSession:
@@ -122,7 +137,7 @@ class DeepSeekTranslator(Translator):
             self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12, connect=4))
         return self._session
 
-    async def translate(self, text: str, target: str = "zh", context: str = "") -> Translation:
+    async def translate(self, text: str, target: str = "zh", context: str | ConversationSnapshot = "") -> Translation:
         # This lower-level method deliberately bypasses local reuse (e.g. API probes).
         return await self.send(self.request(text, target, context), TranslationStats())
 
@@ -301,7 +316,7 @@ class TranslationPipeline:
             if current and current["task"] is asyncio.current_task():
                 self._inflight.pop(key, None)
 
-    async def translate(self, text: str, target: str, context: str = "") -> Translation:
+    async def translate(self, text: str, target: str, context: str | ConversationSnapshot = "") -> Translation:
         if self._closed:
             raise asyncio.CancelledError
         if self._config() != self._configuration:
@@ -310,7 +325,12 @@ class TranslationPipeline:
         if not text:
             return Translation("", self.tr.name, 0)
         request = self.tr.request(text, target, context) if isinstance(self.tr, DeepSeekTranslator) else None
-        key = request.key if request else (self.tr.name, target, context, text)
+        if isinstance(context, ConversationSnapshot):
+            local_context = context.previous
+            payload = (context.glossary_version, json.dumps(context.payload(text), ensure_ascii=False, sort_keys=True))
+        else:
+            local_context, payload = context, context
+        key = request.key if request else (self.tr.name, target, payload, text)
         if len(json.dumps(key, ensure_ascii=False).encode()) > 65536:
             raise ValueError("Translation input too large")
         hit = self.cache.get(key)
@@ -325,7 +345,7 @@ class TranslationPipeline:
         else:
             if len(self._tasks) >= self.max_inflight:
                 raise RuntimeError("Translation request limit exceeded")
-            task = asyncio.create_task(self._run(key, request, text, target, context, epoch, self.stats))
+            task = asyncio.create_task(self._run(key, request, text, target, local_context, epoch, self.stats))
             current = {"task": task, "waiters": 0}
             self._inflight[key] = current
             self._tasks.add(task)
