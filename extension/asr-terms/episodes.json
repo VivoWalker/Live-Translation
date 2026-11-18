@@ -4,6 +4,8 @@
     {
       "episode": "初星学園HR",
       "franchise": "学園アイドルマスター",
+      "scope": "episode",
+      "verified": true,
       "pack": "gakumas",
       "title_contains": ["初星学園HR", "初星学園 HR"],
       "source": "https://idolmaster-official.jp/news/01_10953.html",
@@ -20,30 +22,36 @@
     },
     {
       "franchise": "学園アイドルマスター",
+      "verified": true,
       "pack": "gakumas",
       "title_contains": ["学園アイドルマスター", "学マス", "gakumas"],
       "source": "https://gakuen.idolmaster-official.jp/"
     },
     {
       "franchise": "陽高真白",
+      "verified": true,
       "pack": "mashiro",
       "title_contains": ["陽高真白", "ひたかましろ"],
       "source": "https://github.com/imas/imasparql/blob/master/RDFs/Gakuen.rdf"
     },
     {
       "franchise": "BanG Dream!",
+      "verified": true,
       "pack": "bandori",
       "title_contains": ["BanG Dream", "バンドリ", "MyGO!!!!!", "Ave Mujica"],
       "source": "https://bang-dream.com/"
     },
     {
       "franchise": "Love Live!",
+      "verified": true,
       "pack": "lovelive",
-      "title_contains": ["Love Live", "ラブライブ", "蓮ノ空", "虹ヶ咲"],
+      "title_contains": ["Love Live!", "ラブライブ", "蓮ノ空", "虹ヶ咲"],
+      "title_exact": ["Love Live"],
       "source": "https://www.lovelive-anime.jp/"
     },
     {
       "franchise": "ぼっち・ざ・ろっく！",
+      "verified": true,
       "pack": "general",
       "title_contains": ["ぼっち・ざ・ろっく"],
       "source": "https://bocchi.rocks/"

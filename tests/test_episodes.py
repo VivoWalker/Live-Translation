@@ -5,8 +5,35 @@ from pathlib import Path
 
 from server.episodes import EpisodeCatalog
 
+SELECTIONS = json.loads((Path(__file__).parent / "fixtures/episode_selection.json").read_text())
+
 
 class EpisodeTests(unittest.TestCase):
+    def test_shared_auto_fallback_contract(self):
+        catalog = EpisodeCatalog()
+        for item in SELECTIONS:
+            with self.subTest(title=item["title"], match=item["match"]):
+                selection = catalog.resolve("auto", title=item["title"], packs=item.get("manual"),
+                                            general=item.get("general"))
+                self.assertEqual((selection.match, list(selection.packs)), (item["match"], item["packs"]))
+                if "raw" in item:
+                    self.assertEqual(selection.corrector.correct(item["raw"]), item["text"])
+
+    def test_unverified_program_and_franchise_roster_do_not_change_aggressive_rules(self):
+        program = {"episode": "例の番組", "scope": "episode", "franchise": "例の企画", "pack": "gakumas",
+                   "source": "https://example.test", "title_contains": ["例の番組"], "verified": False}
+        project = {"franchise": "例の企画", "pack": "gakumas",
+                   "source": "https://example.test", "title_contains": ["例の企画"], "terms": [
+                       {"canonical": "夏空太郎", "verified": True, "aliases": ["なつぞら太郎"]}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "episodes.json"
+            path.write_text(json.dumps({"version": 1, "episodes": [program, project]}))
+            catalog = EpisodeCatalog(path)
+        self.assertEqual(catalog.resolve("auto", title="例の番組").match, "unmatched")
+        selection = catalog.resolve("auto", title="例の企画")
+        self.assertEqual(selection.prompt_terms, ())
+        self.assertEqual(selection.corrector.correct("なつぞら太郎"), "なつぞら太郎")
+
     def test_selects_specific_program_and_ignores_unmatched_title(self):
         catalog = EpisodeCatalog()
         active = catalog.resolve("auto", title="【学マス】初星学園ＨＲ #10")

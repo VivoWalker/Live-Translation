@@ -55,6 +55,15 @@
             <option value="off">关闭</option>
           </select>
         </label>
+        <label class="field wide" id="domain-fallback-field" hidden>
+          <span>标题未匹配时</span>
+          <select id="domain-fallback">
+            <option value="default">按运行模式默认</option>
+            <option value="selected">使用下方选择的词库</option>
+            <option value="general">使用保守的直播用语</option>
+            <option value="off">保留原文</option>
+          </select>
+        </label>
         <fieldset class="lexicon-field wide" id="asr-domain-field">
           <legend>专名词库</legend>
           <div class="lexicon-options">

@@ -35,7 +35,7 @@ def _string(value, minimum: int = 2) -> bool:
             and not any(ord(c) < 32 or ord(c) == 127 for c in value))
 
 
-def _read(path: Path, profile: str = "gakumas", source: str = "custom"):
+def _read(path: Path, profile: str = "gakumas", source: str = "custom", *, conservative=False):
     with path.open("rb") as file:
         raw = file.read(MAX_BYTES + 1)
     if len(raw) > MAX_BYTES:
@@ -59,6 +59,9 @@ def _read(path: Path, profile: str = "gakumas", source: str = "custom"):
             raise ValueError("Invalid ASR lexicon cues")
         return tuple(cue for name in requires for cue in cues[name])
 
+    fallback = data.get("fallback", [])
+    if not isinstance(fallback, list) or len(fallback) > 16 or not all(_string(name) for name in fallback):
+        raise ValueError("Invalid ASR fallback terms")
     aliases, terms, rules = set(), set(), []
     for entry in data["entries"]:
         if (not isinstance(entry, dict) or not _string(entry.get("term"))
@@ -103,6 +106,10 @@ def _read(path: Path, profile: str = "gakumas", source: str = "custom"):
                 rules.append(Rule(alias, term, alias_cues, katakana_boundary, source, alias_verified, level, trigger))
     if terms.intersection(rule.alias for rule in rules if rule.level < 3):
         raise ValueError("ASR lexicon cannot cascade replacements")
+    if conservative:
+        fallback_cues = context(["broadcast"])
+        return terms, [replace(rule, cues=fallback_cues, level=2, trigger="fallback_broadcast_cue")
+                       for rule in rules if rule.level < 3 and rule.canonical in fallback]
     return terms, rules
 
 
@@ -148,18 +155,18 @@ class Rule:
                           decision="suggested" if self.level == 3 else "accepted")
 
 
-@lru_cache(maxsize=len(PACKS))
-def _read_pack(pack):
-    return _read(BUILTIN / f"{pack}.json", source=f"pack:{pack}")
+@lru_cache(maxsize=len(PACKS) + 1)
+def _read_pack(pack, conservative=False):
+    return _read(BUILTIN / f"{pack}.json", source=f"pack:{pack}", conservative=conservative)
 
 
 class DomainCorrector:
     def __init__(self, profile: str | list[str] = "gakumas", path: str | Path | None = None, *,
-                 episode_terms: tuple[EpisodeTerm, ...] = ()):
+                 episode_terms: tuple[EpisodeTerm, ...] = (), conservative=False):
         if path is not None and profile not in PROFILES:
             raise ValueError("Use either ASR packs or a custom lexicon")
         if path is None:
-            sources = [_read_pack(pack) for pack in normalize_packs(profile)]
+            sources = [_read_pack(pack, conservative and pack == "general") for pack in normalize_packs(profile)]
         else:
             sources = [_read(Path(path), profile)]
         for extra in episode_terms:

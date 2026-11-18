@@ -20,13 +20,17 @@
     }
     return PACKS.filter(pack => selection.includes(pack));
   }
-  function read(data, profile = 'gakumas', source = 'custom') {
+  function read(data, profile = 'gakumas', source = 'custom', conservative = false) {
     if (!data || data.version !== 1 || !Array.isArray(data.entries) || data.entries.length > MAX_ENTRIES ||
         !data.cues || typeof data.cues !== 'object' || Array.isArray(data.cues)) throw new Error('识别词表格式错误');
     const cues = new Map();
     for (const [name, values] of Object.entries(data.cues)) {
       if (cues.size >= 16 || !Array.isArray(values) || values.length > 40 || !values.every(value => checkedString(value, 1))) throw new Error('识别词表上下文格式错误');
       cues.set(name, values);
+    }
+    const fallback = data.fallback ?? [];
+    if (!Array.isArray(fallback) || fallback.length > 16 || !fallback.every(name => checkedString(name))) {
+      throw new Error('通用词表格式错误');
     }
     function context(requires) {
       if (requires === undefined) return undefined;
@@ -66,7 +70,10 @@
       }
     }
     if (rules.some(rule => rule.level < 3 && terms.has(rule.alias))) throw new Error('识别词表不能级联替换');
-    return { terms, rules };
+    if (!conservative) return { terms, rules };
+    const broadcast = context(['broadcast']);
+    return { terms, rules: rules.filter(rule => rule.level < 3 && fallback.includes(rule.term))
+      .map(rule => ({ ...rule, cues: broadcast, level: 2, trigger: 'fallback_broadcast_cue' })) };
   }
   function compile(packs) {
     const canonical = new Set(packs.flatMap(pack => [...pack.terms]));
@@ -150,9 +157,11 @@
   }
   function loadPacks(data) {
     const packs = new Map(PACKS.map(id => [id, read(data[id], 'gakumas', 'pack:' + id)]));
+    const conservative = read(data.general, 'gakumas', 'pack:general', true);
     return (selection, episode) => {
-      const selected = normalizePacks(selection).map(id => packs.get(id));
-      return compile(episode ? selected.concat(episode.lexicon) : selected);
+      const selected = normalizePacks(selection).map(id => id === 'general' && episode?.match === 'general_fallback'
+        ? conservative : packs.get(id));
+      return compile(selected.concat(episode?.lexicon ?? []));
     };
   }
   function loadEpisodes(data) {
@@ -163,18 +172,36 @@
       if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) throw new Error('节目词表来源无效');
       return value;
     };
-    const fold = text => text.normalize('NFKC').toLowerCase();
-    const rules = [];
-    for (const { episode = '', franchise, pack, title_contains: titles, terms = [], source: url } of data.episodes) {
+    const fold = text => text.normalize('NFKC').toLowerCase().trim().replace(/\s+/g, ' ');
+    const titleMatch = (title, marker) => {
+      const word = char => /[a-z0-9_]/.test(char || '');
+      let start = title.indexOf(marker);
+      while (start !== -1) {
+        const valid = !(word(marker[0]) && word(title[start - 1])) &&
+          !(word(marker.at(-1)) && word(title[start + marker.length]));
+        if (valid) return true;
+        start = title.indexOf(marker, start + 1);
+      }
+      return false;
+    };
+    const records = [];
+    for (const entry of data.episodes) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('节目词条格式错误');
+      const { episode = '', franchise, pack, title_contains: titles = [], title_exact: exact = [], terms = [],
+        source: origin, official_source: url = origin, verified = true, scope = episode ? 'episode' : 'franchise' } = entry;
       if ((episode !== '' && !checkedString(episode)) || !checkedString(franchise) || !PACKS.includes(pack) ||
-          !Array.isArray(titles) || !titles.length || titles.length > 8 || !titles.every(t => checkedString(t, 3)) ||
-          !Array.isArray(terms) || terms.length > 32) throw new Error('节目词条格式错误');
+          !Array.isArray(titles) || !Array.isArray(exact) || !(titles.length + exact.length) || titles.length + exact.length > 8 ||
+          ![...titles, ...exact].every(t => checkedString(t, 3)) || !Array.isArray(terms) || terms.length > 32 ||
+          typeof verified !== 'boolean' || !['episode', 'franchise'].includes(scope) ||
+          (scope === 'episode') !== Boolean(episode)) throw new Error('节目词条格式错误');
       const verifiedSource = source(url);
       const lexicon = [];
-      for (const { canonical, reading = '', verified = false, aliases = [], source: origin = verifiedSource } of terms) {
+      for (const { canonical, reading = '', verified = false, aliases = [], source: origin = verifiedSource,
+        category = 'other', priority = 'normal' } of terms) {
         if (!checkedString(canonical) || typeof verified !== 'boolean' || !Array.isArray(aliases) ||
             aliases.length > 8 || !aliases.every(alias => checkedString(alias, 3)) ||
-            (reading !== '' && !checkedString(reading))) throw new Error('节目专名格式错误');
+            (reading !== '' && !checkedString(reading)) || !checkedString(category, 1) ||
+            !['normal', 'high'].includes(priority)) throw new Error('节目专名格式错误');
         const termSource = source(origin);
         const rules = aliases.filter(alias => alias !== canonical).map(alias => ({
           alias, term: canonical, source: termSource, verified, level: verified ? 2 : 3,
@@ -186,13 +213,21 @@
         });
         lexicon.push({ terms: new Set(verified ? [canonical] : []), rules });
       }
-      const selection = { episode, franchise, pack, source: verifiedSource, lexicon };
-      rules.push(...titles.map(title => [fold(title), selection]));
+      if (verified) records.push({ episode, franchise, pack, source: verifiedSource, match: scope, packs: [pack],
+        lexicon: scope === 'episode' ? lexicon : [], titles: titles.map(fold), exact: exact.map(fold) });
     }
-    rules.sort((a, b) => length(b[0]) - length(a[0]));
-    return title => {
-      const normalized = fold(typeof title === 'string' ? title.slice(0, 240) : '');
-      return rules.find(([match]) => normalized.includes(match))?.[1] || null;
+    return (title, fallback) => {
+      const normalized = fold(typeof title === 'string' ? Array.from(title).slice(0, 240).join('') : '');
+      const matches = records.filter(record => record.exact.includes(normalized) ||
+        record.titles.some(marker => titleMatch(normalized, marker)));
+      const exact = matches.filter(record => record.episode);
+      const choices = exact.length ? exact : matches;
+      if (choices.length === 1) return choices[0];
+      if (!fallback) return null;
+      const manual = normalizePacks(fallback.packs ?? []);
+      if (manual.length) return { match: 'manual_fallback', packs: manual };
+      if (fallback.general === true) return { match: 'general_fallback', packs: ['general'] };
+      return { match: choices.length ? 'ambiguous' : 'unmatched', packs: [] };
     };
   }
   globalThis.JLSASRDomain = Object.freeze({ create, loadPacks, loadEpisodes, normalizePacks, packs: Object.freeze(PACKS) });

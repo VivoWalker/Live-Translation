@@ -28,7 +28,7 @@ async function ensureContentScript(tabId) {
   await chrome.scripting.executeScript({ target: { tabId }, files: ['caption-settings.js', 'caption-overlay.js', 'content.js'] });
 }
 async function start({ tabId, target, serverUrl, streamId, engine = 'browser', apiKey = '', serverToken = '',
-  asrPacks, asrDomain, domainMode, pageTitle, contextTurns, vad, localMode, agent, allowRemote }) {
+  asrPacks, asrDomain, domainMode, domainFallback, pageTitle, contextTurns, vad, localMode, agent, allowRemote }) {
   const packs = JLSASRDomain.normalizePacks(asrPacks ?? asrDomain);
   const endpoint = engine === 'browser' ? DEFAULT_SERVER : JLSServerURL.checked(serverUrl || DEFAULT_SERVER, allowRemote);
   await restored;
@@ -56,7 +56,8 @@ async function start({ tabId, target, serverUrl, streamId, engine = 'browser', a
     const response = await chrome.runtime.sendMessage({
       type: 'jls:offscreen-start', sessionId, streamId, tabId, target,
       serverUrl: endpoint, engine, apiKey, serverToken, allowRemote: allowRemote === true,
-      asrPacks: packs, domainMode, pageTitle: domainMode === 'auto' ? String(pageTitle || '').slice(0, 240) : undefined,
+      asrPacks: packs, domainMode, domainFallback: ['selected', 'general', 'off'].includes(domainFallback) ? domainFallback : undefined,
+      pageTitle: domainMode === 'auto' ? Array.from(String(pageTitle || '')).slice(0, 240).join('') : undefined,
       contextTurns: [1, 3, 4, 5].includes(contextTurns) ? contextTurns : undefined,
       vad, localMode, agent,
     });

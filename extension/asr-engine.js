@@ -110,11 +110,11 @@
     })().catch(() => { domainPromise = null; throw new Error('识别词表加载失败，请重新加载扩展'); });
     await domainPromise;
   }
-  async function findEpisode(title, signal) {
+  async function findEpisode(title, fallback, signal) {
     try {
       if (!episodePromise) episodePromise = loadJson('episodes').then(window.JLSASRDomain.loadEpisodes)
         .catch(error => { episodePromise = null; throw error; });
-      return (await abortable(episodePromise, signal))(title);
+      return (await abortable(episodePromise, signal))(title, fallback);
     } catch (error) {
       signal.throwIfAborted();
       emit({ type: 'error', scope: 'domain', message: '节目词表加载失败，已关闭自动纠错' });
@@ -805,12 +805,14 @@
       await abortable(loadDomain(), signal);
       signal.throwIfAborted();
       const mode = ['auto', 'off'].includes(config.domainMode) ? config.domainMode : 'manual';
-      const episode = mode === 'auto' ? await findEpisode(config.pageTitle, signal) : null;
+      const fallback = { packs: config.domainFallback === 'selected' ? config.asrPacks ?? config.asrDomain ?? [] : [],
+        general: config.domainFallback === 'general' };
+      const episode = mode === 'auto' ? await findEpisode(config.pageTitle, fallback, signal) : null;
       const turns = CONTEXT_WINDOWS.includes(config.contextTurns) ? config.contextTurns : 1;
       const glossary = turns > 1 ? await loadGlossary(signal) : null;
       signal.throwIfAborted();
       setConfig({ target: config.target || 'zh', apiKey: config.apiKey || '', model: config.model || 'deepseek-chat',
-        asrPacks: mode === 'manual' ? config.asrPacks ?? config.asrDomain ?? 'gakumas' : episode ? [episode.pack] : [],
+        asrPacks: mode === 'manual' ? config.asrPacks ?? config.asrDomain ?? 'gakumas' : episode?.packs ?? [],
         domainMode: mode, episode, contextTurns: glossary ? turns : 1, glossary,
         baseUrl: config.baseUrl || 'https://api.deepseek.com', promptVersion: config.promptVersion || PROMPT_VERSION,
         temperature: config.temperature ?? 0.2, maxTokens: config.maxTokens ?? 512 });
@@ -821,7 +823,7 @@
       const t0 = performance.now();
       setupWithModels(module, files);
       ready = started = true;
-      emit({ type: 'ready', initMs: Math.round(performance.now() - t0) });
+      emit({ type: 'ready', initMs: Math.round(performance.now() - t0), domain: domainStatus() });
     } catch (error) {
       if (epoch === generation) stop();
       throw error;
@@ -872,6 +874,11 @@
     );
   }
 
+  function domainStatus() {
+    return { mode: domainMode, episode: activeEpisode?.episode || '', franchise: activeEpisode?.franchise || '',
+      match: activeEpisode?.match || (domainMode === 'auto' ? 'unmatched' : domainMode) };
+  }
+
   function stats() {
     return {
       type: 'stats',
@@ -881,7 +888,7 @@
       rtf: decodeCount ? +(decodeMsTotal / 1000 / Math.max(totalSamples / SAMPLE_RATE, 0.01)).toFixed(3) : 0,
       finals,
       asr_packs: asrPacks?.slice() ?? [],
-      domain: { mode: domainMode, episode: activeEpisode?.episode || '', franchise: activeEpisode?.franchise || '' },
+      domain: domainStatus(),
       vad: { ...vadConfig },
       preview_backlog_skips: previewBacklogSkips,
       translations: translateCount,

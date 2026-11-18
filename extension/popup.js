@@ -15,15 +15,17 @@ const apiKey = $('apikey');
 const server = $('server');
 const serverToken = $('server-token');
 const domainMode = $('domain-mode');
+const domainFallback = $('domain-fallback');
 const contextTurns = $('context-turns');
 const vadSilence = $('vad-silence');
 const vadSegment = $('vad-segment');
 const agentMode = $('agent-mode');
 const allowRemote = $('allow-remote');
 const fallback = $('browser-fallback');
-const sessionFields = [engine, target, apiKey, server, serverToken, domainMode, contextTurns, vadSilence, vadSegment, agentMode];
+const sessionFields = [engine, target, apiKey, server, serverToken, domainMode, domainFallback,
+  contextTurns, vadSilence, vadSegment, agentMode];
 const settingKeys = ['jlsEngine', 'jlsTarget', 'jlsApiKey', 'jlsServer', 'jlsServerToken',
-  'jlsDomainMode', 'jlsContextTurns', 'jlsVadSilence', 'jlsVadSegment', 'jlsAgentMode'];
+  'jlsDomainMode', 'jlsDomainFallback', 'jlsContextTurns', 'jlsVadSilence', 'jlsVadSegment', 'jlsAgentMode'];
 const choice = (value, allowed, defaultValue) => allowed.includes(value) ? value : defaultValue;
 let activeTab, phase = 'idle', operation = 0, ready = false, cacheInfo;
 let prefs = JLS.captionPreferences();
@@ -81,7 +83,9 @@ function renderCaptureStatus(status) {
 function renderFields() {
   const browser = engine.value === 'browser';
   for (const id of ['apikey-field', 'vad-silence-field', 'vad-segment-field']) $(id).hidden = !browser;
-  $('asr-domain-field').hidden = !browser || domainMode.value !== 'manual';
+  $('domain-fallback-field').hidden = domainMode.value !== 'auto';
+  domainField.hidden = !(browser && domainMode.value === 'manual' ||
+    domainMode.value === 'auto' && domainFallback.value === 'selected');
   for (const id of ['server-field', 'token-field', 'agent-field', 'service-note', 'remote-field']) $(id).hidden = browser;
   const cache = $('model-cache-status');
   cache.hidden = !browser || !(cacheInfo?.saved || cacheInfo?.warning);
@@ -123,6 +127,7 @@ async function init() {
   target.value = store.jlsTarget === 'en' ? 'en' : 'zh';
   engine.value = choice(store.jlsEngine, ['server', 'server-enhanced'], 'browser');
   domainMode.value = choice(store.jlsDomainMode, ['auto', 'off'], 'manual');
+  domainFallback.value = choice(store.jlsDomainFallback, ['selected', 'general', 'off'], 'default');
   contextTurns.value = choice(store.jlsContextTurns, ['3', '4', '5'], '1');
   vadSilence.value = choice(store.jlsVadSilence, ['0.4', '0.6', '0.8'], '0.4');
   vadSegment.value = choice(store.jlsVadSegment, ['8', '12', '16'], '12');
@@ -160,7 +165,7 @@ async function init() {
   });
   sessionFields.forEach((field, index) => field.addEventListener('change', () => {
     chrome.storage.local.set({ [settingKeys[index]]: field.value.trim() }).catch(() => {});
-    if (field === engine || field === domainMode) renderFields();
+    if (field === engine || field === domainMode || field === domainFallback) renderFields();
     if (field === target) preview.update(prefs, target.value);
     if (phase === 'error') setPhase('idle');
   }));
@@ -176,7 +181,8 @@ startButton.addEventListener('click', async () => {
   const config = {
     tabId: activeTab.id, target: target.value, engine: engine.value, asrPacks: selectedPacks(),
     serverUrl: server.value.trim() || DEFAULT_SERVER, apiKey: apiKey.value.trim(), serverToken: serverToken.value.trim(),
-    domainMode: domainMode.value, pageTitle: domainMode.value === 'auto' ? activeTab.title : undefined,
+    domainMode: domainMode.value, domainFallback: domainFallback.value,
+    pageTitle: domainMode.value === 'auto' ? activeTab.title : undefined,
     contextTurns: Number(contextTurns.value),
     vad: browser ? { minSilence: Number(vadSilence.value), maxSegment: Number(vadSegment.value) } : undefined,
     localMode: browser ? undefined : engine.value === 'server-enhanced' ? 'enhanced' : 'fast',

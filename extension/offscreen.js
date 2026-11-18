@@ -18,6 +18,18 @@ function failCapture(capture, message) {
   report(capture, 'error', message);
   stopInternal(capture.sessionId);
 }
+function domainNotice(domain) {
+  const messages = {
+    unmatched: '未识别节目，已保留原文',
+    ambiguous: '标题包含多个企划，已保留原文',
+    manual_fallback: '未确定节目，使用自选词库',
+    general_fallback: '未确定节目，使用保守直播词库',
+  };
+  return Object.hasOwn(messages, domain?.match) ? messages[domain.match] : '';
+}
+function captureNotice(capture) {
+  return [capture.notice, capture.domainNotice].filter(Boolean).join('。');
+}
 async function dispose(capture) {
   if (!capture || capture.cancelled) return;
   capture.cancelled = true;
@@ -73,6 +85,10 @@ function connect(capture, url, target, token, settings) {
         resolve();
       }
       if (msg.type === 'stats') msg.client_buffered_bytes = sock.bufferedAmount || 0;
+      if (msg.type === 'config' && msg.domain) {
+        capture.domainNotice = domainNotice(msg.domain);
+        if (capture.capturing && !capture.congested) report(capture, 'capturing', captureNotice(capture));
+      }
       send(capture, msg);
     };
     sock.onerror = () => fail(new Error('无法连接字幕服务'));
@@ -127,6 +143,10 @@ async function start(msg) {
     if (local) {
       const settings = msg.domainMode === 'auto' ? { domain: 'auto', page_title: msg.pageTitle }
         : msg.domainMode === 'off' ? { domain: 'off' } : {};
+      if (msg.domainMode === 'auto' && ['selected', 'general', 'off'].includes(msg.domainFallback)) {
+        settings.packs = msg.domainFallback === 'selected' ? msg.asrPacks : [];
+        settings.domain_general = msg.domainFallback === 'general';
+      }
       if (msg.contextTurns !== undefined) settings.context_turns = msg.contextTurns;
       if (msg.localMode !== undefined) settings.mode = msg.localMode;
       if (typeof msg.agent === 'boolean') settings.agent = msg.agent;
@@ -137,12 +157,16 @@ async function start(msg) {
       await Promise.race([JLSEngine.init({ target: msg.target || 'zh', apiKey: msg.apiKey || '', asrPacks: msg.asrPacks ?? msg.asrDomain, onEvent: event => {
         if (!current(capture)) return;
         if (event.type === 'progress') report(capture, 'starting', event.message);
-        else send(capture, event);
-      }, domainMode: msg.domainMode, pageTitle: msg.pageTitle, contextTurns: msg.contextTurns, vad: msg.vad }), capture.cancelledPromise]);
+        else {
+          if (event.type === 'ready') capture.domainNotice = domainNotice(event.domain);
+          send(capture, event);
+        }
+      }, domainMode: msg.domainMode, domainFallback: msg.domainFallback, pageTitle: msg.pageTitle,
+      contextTurns: msg.contextTurns, vad: msg.vad }), capture.cancelledPromise]);
       check(capture);
     }
     const audioStart = capture.ctx.currentTime;
-    let audioSeconds = 0, congested = false;
+    let audioSeconds = 0;
     capture.node.port.onmessage = ({ data }) => {
       if (!current(capture)) return;
       if (data.overrun) { failCapture(capture, '音频处理积压，请重新开始字幕'); return; }
@@ -154,9 +178,9 @@ async function start(msg) {
             return;
           }
           const warning = buffered > SOCKET_WARN_BYTES;
-          if (warning !== congested) {
-            congested = warning;
-            report(capture, warning ? 'degraded' : 'capturing', warning ? '音频发送积压' : capture.notice);
+          if (warning !== Boolean(capture.congested)) {
+            capture.congested = warning;
+            report(capture, warning ? 'degraded' : 'capturing', warning ? '音频发送积压' : captureNotice(capture));
           }
           capture.ws.send(data);
         } else if (capture.engineStarted) {
@@ -169,7 +193,8 @@ async function start(msg) {
       }
     };
     capture.source.connect(capture.node);
-    report(capture, 'capturing', capture.notice || '');
+    capture.capturing = true;
+    report(capture, 'capturing', captureNotice(capture));
     capture.statsTimer = setInterval(() => {
       if (!current(capture)) return;
       if (local && capture.ws?.readyState === 1) capture.ws.send(JSON.stringify({ type: 'stats' }));

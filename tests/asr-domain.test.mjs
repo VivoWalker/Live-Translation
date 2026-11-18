@@ -6,6 +6,7 @@ import vm from 'node:vm';
 const root = new URL('../', import.meta.url);
 const cases = JSON.parse(fs.readFileSync(new URL('tests/fixtures/asr_domain_cases.json', root), 'utf8'));
 const evidenceCases = JSON.parse(fs.readFileSync(new URL('tests/fixtures/asr_domain_evidence.json', root), 'utf8'));
+const selections = JSON.parse(fs.readFileSync(new URL('tests/fixtures/episode_selection.json', root), 'utf8'));
 const sandbox = vm.createContext({ URL });
 vm.runInContext(fs.readFileSync(new URL('extension/asr-domain.js', root), 'utf8'), sandbox);
 const create = (...args) => sandbox.JLSASRDomain.create(...args);
@@ -87,6 +88,17 @@ test('an alias cannot elevate its unverified custom entry', () => {
   assert.equal(result.text, '元表記');
   assert.equal(result.changes.length, 0);
   assert.equal(result.candidates[0].verified, false);
+});
+
+test('shared episode selection and fallback contract', () => {
+  const raw = JSON.parse(fs.readFileSync(new URL('extension/asr-terms/episodes.json', root), 'utf8'));
+  const catalog = sandbox.JLSASRDomain.loadEpisodes(raw);
+  for (const item of selections) {
+    const selection = catalog(item.title, { packs: item.manual, general: item.general });
+    assert.equal(selection.match, item.match, item.title);
+    assert.deepEqual(Array.from(selection.packs), item.packs);
+    if (item.raw) assert.equal(select(selection.packs, selection).correct(item.raw), item.text);
+  }
 });
 
 test('literal matching respects English word boundaries, longest aliases and existing names', () => {

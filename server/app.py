@@ -223,7 +223,8 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                         if type(turns) is not int or turns not in CONTEXT_WINDOWS:
                             raise ValueError("Invalid translation context size")
                         domain = (state.episodes.resolve(data["domain"], title=data.get("page_title", ""),
-                                                         packs=data.get("packs")) if "domain" in data else None)
+                                                         packs=data.get("packs"), general=data.get("domain_general"))
+                                  if "domain" in data else None)
                         await session.set_target(target)
                         if domain is not None:
                             session.set_domain(domain)
@@ -377,6 +378,10 @@ def main() -> int:
     lexicon.add_argument("--asr-domain", choices=PROFILES, help="Legacy ASR lexicon profile")
     ap.add_argument("--asr-terms", default=cfg.get("asr_terms"), help="Custom ASR lexicon JSON, replaces built-in terms")
     ap.add_argument("--episode-catalog", default=cfg.get("episode_catalog"), help="Local episode metadata JSON")
+    ap.add_argument("--auto-domain-packs", nargs="*", choices=PACKS, default=cfg.get("auto_domain_packs"),
+                    help="Packs to use when the title does not identify a single context")
+    ap.add_argument("--auto-domain-general", action=argparse.BooleanOptionalAction,
+                    default=cfg.get("auto_domain_general", False), help="Use guarded broadcast terms as a fallback")
     ap.add_argument("--context-turns", type=int, choices=CONTEXT_WINDOWS, default=cfg.get("context_turns", 1))
     ap.add_argument("--translation-glossary", default=cfg.get("translation_glossary"))
     ap.add_argument("--agent", action=argparse.BooleanOptionalAction, default=cfg.get("agent", False))
@@ -401,7 +406,8 @@ def main() -> int:
         if args.agent_budget_ms is not None and not 100 <= args.agent_budget_ms <= 1500:
             raise ValueError("Agent budget must be between 100 and 1500 ms")
         vad = VadSettings(args.vad_min_silence, args.vad_max_segment, args.vad_overlap)
-        episodes = EpisodeCatalog(args.episode_catalog)
+        episodes = EpisodeCatalog(args.episode_catalog, fallback_packs=args.auto_domain_packs,
+                                  general_fallback=args.auto_domain_general)
         glossary = Glossary.load(args.translation_glossary)
         asr, fallback_from = select_recognizer(args.asr, model_dir=args.model_dir, language="ja",
                                                num_threads=args.threads, asr_domain=selection, asr_terms=args.asr_terms,
