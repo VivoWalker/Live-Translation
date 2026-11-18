@@ -209,15 +209,20 @@ def build_app(state: AppState, *, dev_assets: bool = False) -> web.Application:
     app.router.add_get("/ws", ws_handler)
     app.router.add_get("/health", health)
     app.router.add_get("/", index)
-    public_assets = {"app.js", "captions.js", "style.css", "pcm-worklet.js", "sample-ja.wav"}
+    extension_assets = {
+        "captions.js": "caption-overlay.js",
+        "caption-settings.js": "caption-settings.js",
+        "interface.css": "interface.css",
+    }
+    public_assets = {"app.js", "style.css", "pcm-worklet.js", "sample-ja.wav", *extension_assets}
     if dev_assets:
         public_assets.update({"test-player.html", "engine-test.html", "wasm-test.html", "worklet-test.html", "worklet-probe.js"})
     async def static_asset(request):
         name = request.match_info["name"]
         if name not in public_assets:
             raise web.HTTPNotFound()
-        if name == "captions.js":
-            return web.FileResponse(ROOT / "extension" / "caption-overlay.js")
+        if name in extension_assets:
+            return web.FileResponse(ROOT / "extension" / extension_assets[name])
         return web.FileResponse(WEB_DIR / "static" / name)
     app.router.add_get("/static/{name}", static_asset)
     if dev_assets:

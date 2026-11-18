@@ -9,6 +9,10 @@ const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 const extensionId = 'a'.repeat(32);
 const extensionURL = path => `chrome-extension://${extensionId}/${path}`;
+function loadBackground(sandbox) {
+  sandbox.importScripts = file => vm.runInContext(read(file), sandbox);
+  vm.runInContext(read('background.js'), sandbox);
+}
 function dispatch(listener, message, page = 'background.js') {
   return new Promise(resolve => {
     if (!listener(message, { id: extensionId, url: extensionURL(page) }, resolve)) resolve(undefined);
@@ -427,12 +431,12 @@ test('background forwards mode/keys and refuses stale or spoofed events', async 
     console, crypto: webcrypto, setTimeout,
     chrome: {
       runtime: { id: extensionId, getURL: extensionURL, getContexts: async () => [{}], onMessage: { addListener(fn) { listener = fn; } }, sendMessage: async m => { sent.push(m); return { ok: true }; } },
-      storage: { local: { setAccessLevel: async () => {}, set: async entries => Object.assign(values, entries) }, session: { get: async key => ({ [key]: values[key] }), set: async entries => Object.assign(values, entries) } },
+      storage: { local: { setAccessLevel: async () => {}, get: async key => ({ [key]: values[key] }), set: async entries => Object.assign(values, entries) }, session: { get: async key => ({ [key]: values[key] }), set: async entries => Object.assign(values, entries) } },
       tabs: { sendMessage: async (id, m) => { painted.push({ id, ...m }); return { ok: true }; }, query: async () => [], onRemoved: { addListener() {} } },
       action: { setBadgeText() {}, setBadgeBackgroundColor() {} },
     },
   });
-  vm.runInContext(read('background.js'), sandbox);
+  loadBackground(sandbox);
   const message = { type: 'jls:start', tabId: 1, engine: 'server', apiKey: 'sk-fake', serverToken: 'token', streamId: 'mock', asrDomain: 'anime' };
   assert.equal((await dispatch(listener, message, 'popup.html')).ok, true);
   const first = sent.find(m => m.type === 'jls:offscreen-start');
@@ -455,6 +459,12 @@ test('background forwards mode/keys and refuses stale or spoofed events', async 
   await dispatch(listener, { type: 'jls:event', sessionId: last.sessionId, event: { text: 'current' } }, 'offscreen.html');
   await tick();
   assert.equal(painted[0].id, 2);
+  await dispatch(listener, { type: 'jls:caption-settings-set', settings: { theme: 'dark', sourceSize: 19, apiKey: 'private' } }, 'popup.html');
+  assert.equal(painted.at(-1).type, 'jls:caption-settings-update');
+  assert.equal(painted.at(-1).id, 2);
+  assert.equal(painted.at(-1).settings.sourceSize, 19);
+  assert.equal(painted.at(-1).settings.theme, 'dark');
+  assert.equal(painted.at(-1).settings.apiKey, undefined);
   await dispatch(listener, { type: 'jls:stop' }, 'popup.html');
   assert.equal((await dispatch(listener, { type: 'jls:query' }, 'popup.html')).running, false);
   painted.length = 0;
@@ -467,23 +477,26 @@ test('browser-mode popup starts without fetching a local service', async () => {
   let calls = 0;
   const sent = [], elements = new Map();
   const element = id => {
-    if (!elements.has(id)) elements.set(id, { value: '', className: '', addEventListener(name, fn) { this[name] = fn; } });
+    if (!elements.has(id)) elements.set(id, { value: '', className: '', dataset: {}, addEventListener(name, fn) { this[name] = fn; } });
     return elements.get(id);
   };
   const sandbox = vm.createContext({
-    document: { getElementById: element }, window: { addEventListener() {} }, setInterval: () => 1, clearInterval() {},
+    document: { getElementById: element, documentElement: { dataset: {} } },
     fetch: async () => { calls++; throw new Error('No local service'); },
     chrome: {
       tabs: { query: async () => [{ id: 1, url: 'https://video.test', title: 'test' }] },
-      storage: { local: { get: async () => ({ jlsEngine: 'browser', jlsApiKey: 'sk-fake', jlsModelCache: { saved: false, warning: true, message: '模型未保存' } }), set: async () => {} }, session: { get: async () => ({}) } },
+      storage: { local: { get: async () => ({ jlsEngine: 'browser', jlsApiKey: 'sk-fake', jlsModelCache: { saved: false, warning: true, message: '模型未保存' } }), set: async () => {} }, session: { get: async () => ({}) }, onChanged: { addListener() {} } },
       runtime: { sendMessage: async m => { sent.push(m); return m.type === 'jls:query' ? { running: false } : { ok: true }; } },
       tabCapture: { getMediaStreamId: async () => 'mock' },
     },
   });
+  vm.runInContext(read('caption-settings.js'), sandbox);
+  sandbox.JLS.createCaptionEditor = () => ({ update() {} });
+  sandbox.JLS.createCaptionPreview = () => ({ update() {} });
   vm.runInContext(read('popup.js'), sandbox);
   await tick();
   assert.equal(element('model-cache-status').textContent, '模型未保存');
-  assert.equal(element('model-cache-status').className, 'hint warning');
+  assert.equal(element('model-cache-status').className, 'model-cache warning');
   await element('start').click();
   assert.equal(calls, 0);
   assert.equal(sent.find(m => m.type === 'jls:start').engine, 'browser');
@@ -503,7 +516,7 @@ test('content scripts can persist only public caption preferences through the ba
       tabs: { onRemoved: { addListener() {} } },
     },
   });
-  vm.runInContext(read('background.js'), sandbox);
+  loadBackground(sandbox);
   const sender = { id: extensionId, tab: { id: 1 }, url: 'https://video.example/watch' };
   const ask = (message, from = sender) => new Promise(resolve => {
     if (!listener(message, from, resolve)) resolve(null);
@@ -523,7 +536,7 @@ test('content scripts can persist only public caption preferences through the ba
   assert.equal(await ask({ type: 'jls:caption-settings-get' }, { id: extensionId }), null);
   const manifest = JSON.parse(read('manifest.json'));
   const scripts = manifest.content_scripts.find(entry => entry.js.includes('content.js')).js;
-  assert(scripts.indexOf('caption-overlay.js') >= 0 && scripts.indexOf('caption-overlay.js') < scripts.indexOf('content.js'));
+  assert.deepEqual(scripts, ['caption-settings.js', 'caption-overlay.js', 'content.js']);
 });
 
 const successfulReply = (text = '完整译文', usage = { prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 20, completion_tokens: 5 }) => ({

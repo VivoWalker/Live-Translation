@@ -4,7 +4,9 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const sandbox = vm.createContext({ setTimeout, clearTimeout, performance });
-vm.runInContext(fs.readFileSync(new URL('../extension/caption-overlay.js', import.meta.url), 'utf8'), sandbox);
+for (const file of ['caption-settings.js', 'caption-overlay.js']) {
+  vm.runInContext(fs.readFileSync(new URL('../extension/' + file, import.meta.url), 'utf8'), sandbox);
+}
 const { CaptionTimeline, captionReadingTime, captionPreferences } = sandbox.JLS;
 function fixture() {
   let now = 0, next = 0;
@@ -125,12 +127,36 @@ test('a long-running session keeps bounded state and clear cancels scheduled wor
 
 test('public style preferences accept only known, bounded values', () => {
   const prefs = captionPreferences({ fontSize: 1000, width: -1, background: 100, cps: 0,
-    color: 'url(https://bad.invalid)', position: { x: -100, y: 100 }, apiKey: 'private', showJa: false });
+    color: 'url(https://bad.invalid)', position: { x: -100, y: 100 }, apiKey: 'private', showJa: false,
+    anchor: 'top', align: 'left', theme: '__proto__', font: 'url(https://bad.invalid)',
+    sourceColor: '#ABCDEF', focusBackground: 40, animations: false, minSeconds: 50 });
   assert.equal(prefs.fontSize, 40); assert.equal(prefs.width, 40); assert.equal(prefs.background, 70);
   assert.equal(prefs.cps, 4); assert.equal(prefs.color, '#f3f6ff'); assert.equal(prefs.showJa, false);
   assert.equal(prefs.position.x, 0); assert.equal(prefs.position.y, 1);
   assert.equal(prefs.apiKey, undefined);
+  assert.equal(prefs.sourceSize, 28);
+  assert.equal(prefs.sourceColor, '#abcdef');
+  assert.equal(prefs.anchor, 'top');
+  assert.equal(prefs.align, 'left');
+  assert.equal(prefs.focusBackground, 75);
+  assert.equal(prefs.font, 'system');
+  assert.equal(prefs.theme, 'system');
+  assert.equal(prefs.animations, false);
+  assert.equal(prefs.minSeconds, 10);
   assert.equal(captionPreferences(null).fontSize, 24);
+});
+
+test('changing minimum reading time extends short captions without changing departure order', () => {
+  const { timeline, advance } = fixture();
+  complete(timeline, 1, '前一句较长，需要先读完。'.repeat(3));
+  complete(timeline, 2, '好');
+  timeline.speed(10, 7);
+  assert.equal(timeline.visible[0].readUntil, 7000);
+  assert.equal(timeline.visible[1].readUntil, 7000);
+  advance(7001);
+  assert.deepEqual(Array.from(timeline.visible, entry => entry.id), [2]);
+  advance(600);
+  assert.equal(timeline.visible.length, 0);
 });
 
 test('an overdue timer still dismisses the earlier sentence before the later short one', () => {

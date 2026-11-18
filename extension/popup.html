@@ -1,66 +1,83 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
-<meta charset="utf-8" />
-<link rel="stylesheet" href="popup.css" />
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>实时字幕</title>
+  <link rel="stylesheet" href="interface.css">
+  <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <header>
-    <div class="title">实时字幕</div>
-    <div class="dot" id="dot"></div>
+  <header class="popup-header">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <h1>实时字幕</h1>
+    <span class="status-pill" id="capture-status" data-phase="idle" role="status">
+      <span class="dot" aria-hidden="true"></span><span id="status">待开始</span>
+    </span>
   </header>
 
-  <p class="now" id="tab-title">当前标签页</p>
+  <nav class="popup-tabs" aria-label="扩展菜单">
+    <button id="session-tab" type="button" aria-controls="session-panel" aria-pressed="true">会话</button>
+    <button id="caption-tab" type="button" aria-controls="caption-panel" aria-pressed="false">字幕</button>
+  </nav>
 
-  <label class="field">
-    译文
-    <select id="target">
-      <option value="zh" selected>简体中文</option>
-      <option value="en">English</option>
-    </select>
-  </label>
+  <main id="menu-content" class="popup-body">
+    <section id="session-panel" aria-labelledby="session-tab">
+      <div class="now">
+        <span class="tab-icon" aria-hidden="true"></span>
+        <p id="tab-title">当前标签页</p>
+      </div>
+      <div class="fields">
+        <label class="field">
+          <span>运行模式</span>
+          <select id="engine">
+            <option value="browser">浏览器内</option>
+            <option value="server">本地服务</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>译文语言</span>
+          <select id="target">
+            <option value="zh">简体中文</option>
+            <option value="en">English</option>
+          </select>
+        </label>
+        <label class="field wide" id="asr-domain-field">
+          <span>专名词表</span>
+          <select id="asr-domain">
+            <option value="gakumas">学マス · 陽高真白 · 动漫声优</option>
+            <option value="anime">动漫声优 · BanG Dream! · Love Live!</option>
+            <option value="off">关闭</option>
+          </select>
+        </label>
+        <label class="field wide" id="apikey-field">
+          <span>DeepSeek API Key</span>
+          <input id="apikey" type="password" placeholder="sk-…" autocomplete="off">
+        </label>
+        <label class="field wide" id="server-field" hidden>
+          <span>服务地址</span>
+          <input id="server" type="text" spellcheck="false" autocomplete="off">
+        </label>
+        <label class="field wide" id="token-field" hidden>
+          <span>本地服务访问令牌</span>
+          <input id="server-token" type="password" placeholder="输入终端显示的令牌" autocomplete="off">
+        </label>
+      </div>
+      <p class="model-cache" id="model-cache-status" hidden></p>
+    </section>
 
-  <label class="field">
-    识别引擎
-    <select id="engine">
-      <option value="browser">浏览器内（免安装）</option>
-      <option value="server">本地服务（更高帧率）</option>
-    </select>
-  </label>
+    <section id="caption-panel" aria-labelledby="caption-tab" hidden>
+      <div id="caption-preview" aria-label="字幕预览"></div>
+      <div id="caption-editor"></div>
+    </section>
+  </main>
 
-  <label class="field">
-    DeepSeek Key
-    <input id="apikey" type="password" placeholder="sk-…（只存本机）" autocomplete="off" />
-  </label>
-
-  <label class="field" id="asr-domain-field">
-    专名纠错
-    <select id="asr-domain">
-      <option value="gakumas">学マス / 陽高真白 + 动漫声优</option>
-      <option value="anime">动漫声优 / BanG Dream! / Love Live!</option>
-      <option value="off">关闭</option>
-    </select>
-  </label>
-  <p class="hint" id="asr-domain-hint">本地纠正已识别的专名写法；歌名需要相关语境。本地服务的词表由服务启动参数设置。</p>
-
-  <label class="field" id="server-field" hidden>
-    本地服务
-    <input id="server" type="text" spellcheck="false" />
-  </label>
-  <label class="field" id="token-field" hidden>
-    本地服务访问令牌
-    <input id="server-token" type="password" placeholder="复制服务启动时显示的访问令牌" autocomplete="off" />
-  </label>
-
-  <div class="actions">
-    <button id="start" class="primary">开始字幕</button>
-    <button id="stop" class="ghost" disabled>停止</button>
-  </div>
-
-  <p class="status" id="status">检查服务…</p>
-  <p class="hint" id="model-cache-status" hidden></p>
-  <p class="hint">浏览器内模式首次使用会下载约 240 MB 识别模型（之后走缓存）。开始后本页音频会被采集，播放不受影响，字幕叠加在网页底部可拖动。</p>
-
+  <footer class="popup-footer">
+    <p id="message" class="message" role="status" hidden></p>
+    <button id="start" type="button" class="button primary" disabled><span class="play-icon" aria-hidden="true"></span>开始字幕</button>
+    <button id="stop" type="button" class="button stop" hidden><span class="stop-icon" aria-hidden="true"></span>停止字幕</button>
+  </footer>
+  <script src="caption-settings.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

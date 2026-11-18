@@ -1,260 +1,290 @@
-/* Demo client: the same WebSocket protocol the extension uses.
-   Audio sources:
-     display – getDisplayMedia(tab audio): what a user does in the browser
-     file     – built-in Japanese clip: tests the browser path end-to-end
-*/
-(function () {
+/* Local workspace using the same authenticated WebSocket and caption renderer as the extension. */
+(() => {
   'use strict';
 
-  const state = {
-    ws: null,
-    ctx: null,
-    node: null,
-    source: null,
-    capturing: false,
-    captions: null,
-    engine: '—',
-    currentId: null,
-    finals: 0,
-    statsTimer: null,
-  };
+  const $ = id => document.getElementById(id);
+  const stage = $('caption-stage');
+  const accessToken = $('access-token');
+  const target = $('target');
+  const startButton = $('btn-start');
+  const sampleButton = $('link-file');
+  const stopButton = $('btn-stop');
+  const appPrefsKey = 'jls.captionPrefs.v1';
+  const targetKey = 'jls.target.v1';
+  let active = null;
+  let prefs = JLS.captionPreferences();
 
-  const $ = (id) => document.getElementById(id);
-  const btnStart = $('btn-start');
-  const btnStop = $('btn-stop');
-  const dot = $('dot');
-  const statusEl = $('status');
-  const engineEl = $('engine');
-  const statsEl = $('stats');
-  const targetEl = $('target');
+  try {
+    prefs = JLS.captionPreferences(JSON.parse(localStorage.getItem(appPrefsKey) || '{}'));
+    target.value = localStorage.getItem(targetKey) === 'en' ? 'en' : 'zh';
+  } catch {}
 
-  function wsUrl() {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return proto + '//' + location.host + '/ws';
+  const preview = JLS.createCaptionPreview($('stage-preview'));
+  const editor = JLS.createCaptionEditor($('caption-editor'), { onChange: applySettings });
+  const captions = JLS.createCaptionOverlay({
+    mount: stage, embedded: true, showMeta: false, showSettings: false,
+    loadSettings: () => prefs,
+    saveSettings: settings => applySettings(settings, true),
+  });
+  captions.hide();
+
+  function showMessage(text, error = false) {
+    const notice = $('message');
+    notice.hidden = !text;
+    notice.dataset.kind = error ? 'error' : '';
+    notice.textContent = text || '';
   }
 
-  function setStatus(text, kind) {
-    statusEl.textContent = text;
-    dot.className = 'dot' + (kind ? ' ' + kind : '');
+  function applySettings(value, commit) {
+    prefs = JLS.captionPreferences(value);
+    document.documentElement.dataset.theme = prefs.theme;
+    editor.update(prefs);
+    captions.setSettings(prefs);
+    preview.update(prefs, target.value);
+    if (commit) {
+      try { localStorage.setItem(appPrefsKey, JSON.stringify(prefs)); }
+      catch { showMessage('字幕设置未能保存', true); }
+    }
   }
 
-  function setRunning(on) {
-    btnStart.disabled = on;
-    btnStop.disabled = !on;
-    state.capturing = on;
+  function setStatus(text, phase = 'idle') {
+    $('connection').dataset.phase = phase;
+    $('status').textContent = text;
   }
 
-  function connect() {
+  function updateView() {
+    const live = !!active;
+    startButton.hidden = sampleButton.hidden = live;
+    stopButton.hidden = !live;
+    accessToken.disabled = live;
+    stage.dataset.live = String(live);
+    stage.dataset.caption = String(live && active.hasCaption);
+    $('stage-title').textContent = live ? '实时字幕' : '字幕预览';
+    $('stage-preview').hidden = live;
+    $('stage-empty').hidden = !live || active.hasCaption;
+    if (live && !active.hasCaption) $('stage-empty').textContent = active.stageMessage || '等待语音';
+    if (!live) stage.style.removeProperty('--level');
+  }
+
+  function updateTarget() {
+    $('stage-languages').textContent = target.value === 'en' ? '日语 → 英语' : '日语 → 简体中文';
+    preview.update(prefs, target.value);
+  }
+
+  function isCurrent(session) { return active === session; }
+
+  function requireCurrent(session) {
+    if (!isCurrent(session)) throw new DOMException('采集已取消', 'AbortError');
+  }
+
+  function connect(session, token) {
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(wsUrl());
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = session.ws = new WebSocket(proto + '//' + location.host + '/ws');
       ws.binaryType = 'arraybuffer';
-      const timer = setTimeout(() => reject(new Error('连接字幕服务超时')), 5000);
+      function fail(message) {
+        clearTimeout(timer);
+        reject(new Error(message));
+      }
+      const timer = setTimeout(() => fail('连接字幕服务超时'), 5000);
+      session.cancelConnect = () => fail('连接已取消');
       ws.onopen = () => {
-        const token = $('access-token').value.trim();
+        if (!isCurrent(session)) return ws.close();
         ws.send(JSON.stringify({ type: 'auth', token }));
-        ws.send(JSON.stringify({ type: 'config', target: targetEl.value }));
+        ws.send(JSON.stringify({ type: 'config', target: target.value }));
       };
-      ws.onmessage = (ev) => {
-        if (state.ws !== ws) return;
-        let msg;
-        try {
-          msg = JSON.parse(ev.data);
-        } catch (e) {
-          return;
-        }
-        if (msg.type === 'ready') {
+      ws.onmessage = event => {
+        if (!isCurrent(session)) return;
+        let message;
+        try { message = JSON.parse(event.data); } catch { return; }
+        if (message.type === 'ready') {
           clearTimeout(timer);
-          resolve(msg);
+          session.cancelConnect = null;
+          resolve();
         }
-        handle(msg);
+        handle(session, message);
       };
-      ws.onerror = () => {
-        clearTimeout(timer);
-        reject(new Error('无法连接字幕服务，请先启动 python -m server.app'));
+      ws.onerror = () => fail('无法连接字幕服务');
+      ws.onclose = event => {
+        const error = event.code === 1008 ? '服务拒绝连接，请检查访问令牌' : '字幕服务已断开';
+        fail(error);
+        if (isCurrent(session)) stop(session, error, true);
       };
-      ws.onclose = (event) => {
-        clearTimeout(timer);
-        reject(new Error(event.code === 1008 ? '字幕服务拒绝连接，请检查访问令牌或音频速率' : '字幕服务已断开'));
-        if (state.ws === ws) {
-          state.ws = null;
-          if (state.capturing) setStatus('连接中断', 'err');
-        }
-      };
-      state.ws = ws;
     });
   }
 
-  function handle(msg) {
-    const cap = state.captions;
-    switch (msg.type) {
+  function handle(session, message) {
+    switch (message.type) {
       case 'ready':
-        state.engine = msg.translator;
-        engineEl.textContent = 'ASR ' + msg.asr + ' · MT ' + msg.translator;
-        setStatus('已连接，等待说话', 'live');
+        $('engine').textContent = message.asr + ' / ' + message.translator;
+        $('stats').textContent = '0 句';
+        $('latency').textContent = '—';
+        $('diagnostics').hidden = false;
         break;
       case 'speech_start':
-        cap.start(msg.id);
+        captions.start(message.id);
         break;
       case 'partial':
-        cap.text(msg.id, 'partial', msg.text);
-        cap.setMeta('识别中 · ' + (msg.t || 0).toFixed(1) + 's');
-        break;
       case 'final':
-        state.finals += 1;
-        cap.text(msg.id, 'final', msg.text);
-        cap.setMeta('第 ' + state.finals + ' 句 · 识别 ' + (msg.decode_ms || 0).toFixed(0) + 'ms');
+        captions.text(message.id, message.type, message.text);
+        if (message.text && prefs.showJa && !session.hasCaption) {
+          session.hasCaption = true;
+          updateView();
+        }
         break;
-      case 'translation': {
-        cap.translation(msg.id, msg.text, msg.final);
-        const eng = String(msg.engine).replace(':cache', '');
-        cap.setMeta((msg.final ? '译文' : '译文草稿') + ' · ' + eng + ' ' + (msg.ms ? msg.ms + 'ms' : '缓存'));
+      case 'translation':
+        captions.translation(message.id, message.text, message.final);
+        if (message.text && !session.hasCaption) {
+          session.hasCaption = true;
+          updateView();
+        }
+        if ($('message').dataset.kind === 'error') showMessage('');
         break;
-      }
       case 'stats':
-        statsEl.textContent = 'RTF ' + msg.rtf + ' · 平均翻译 ' + (msg.avg_translate_ms >= 1 ? msg.avg_translate_ms + 'ms' : '缓存命中');
+        $('stats').textContent = (message.translations ?? 0) + ' 句';
+        const ms = message.translation?.avg_request_ms;
+        $('latency').textContent = Number.isFinite(ms) ? Math.round(ms) + ' ms' : '—';
         break;
       case 'error':
-        if (msg.scope === 'translate') cap.translationFailed(msg.id);
-        cap.setMeta('翻译失败：' + msg.message);
+        if (message.scope === 'translate') captions.translationFailed(message.id);
+        showMessage(message.message || '字幕处理失败', true);
         break;
       case 'translation_cancelled':
-        cap.translationFailed(msg.id);
-        break;
-      default:
+        captions.translationFailed(message.id);
         break;
     }
   }
 
-  async function ensureAudio() {
-    if (!state.ctx) {
-      state.ctx = new AudioContext({ sampleRate: 16000 });
-      await state.ctx.audioWorklet.addModule('/static/pcm-worklet.js');
-    }
-    if (state.ctx.state === 'suspended') await state.ctx.resume();
-    if (!state.node) {
-      state.node = new AudioWorkletNode(state.ctx, 'pcm-tap', {
-        numberOfInputs: 1,
-        numberOfOutputs: 0,
-        channelCount: 1,
-        channelCountMode: 'explicit',
-      });
-      state.node.port.onmessage = (e) => {
-        if (state.ws && state.ws.readyState === 1) state.ws.send(e.data);
-      };
-    }
-  }
-
-  async function startDisplay() {
-    const stream = await navigator.mediaDevices.getDisplayMedia({
-      video: true,
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+  async function setupAudio(session) {
+    const ctx = session.ctx = new AudioContext({ sampleRate: 16000 });
+    await ctx.audioWorklet.addModule('/static/pcm-worklet.js');
+    requireCurrent(session);
+    if (ctx.state === 'suspended') await ctx.resume();
+    requireCurrent(session);
+    const node = session.node = new AudioWorkletNode(ctx, 'pcm-tap', {
+      numberOfInputs: 1, numberOfOutputs: 0, channelCount: 1, channelCountMode: 'explicit',
     });
-    if (!stream.getAudioTracks().length) {
-      stream.getTracks().forEach((t) => t.stop());
-      throw new Error('所选来源没有音频，请勾选“分享标签页音频”');
-    }
-    const src = state.ctx.createMediaStreamSource(stream);
-    src.connect(state.node);
-    state.source = { kind: 'display', stream, src };
-  }
-
-  async function startFile(url) {
-    const res = await fetch(url || '/static/sample-ja.wav');
-    const buf = await state.ctx.decodeAudioData(await res.arrayBuffer());
-    const src = state.ctx.createBufferSource();
-    src.buffer = buf;
-    src.loop = true;
-    src.connect(state.node);
-    src.start();
-    state.source = { kind: 'file', src };
+    node.port.onmessage = event => {
+      if (!isCurrent(session) || session.ws.readyState !== WebSocket.OPEN) return;
+      const samples = event.data;
+      session.ws.send(samples);
+      let energy = 0;
+      for (let index = 0; index < samples.length; index += 16) energy += samples[index] ** 2;
+      const level = Math.min(1, Math.sqrt(energy / Math.max(1, samples.length / 16)) * 7);
+      stage.style.setProperty('--level', level.toFixed(2));
+    };
   }
 
   async function start(kind, url) {
-    if (state.capturing) return;
-    if (!$('access-token').value.trim()) {
-      setStatus('请填写服务启动时显示的访问令牌', 'err');
+    if (active) return;
+    const token = accessToken.value.trim();
+    if (!token) {
+      setStatus('需要令牌', 'error');
+      showMessage('请填写服务终端显示的访问令牌', true);
+      accessToken.focus();
       return;
     }
-    setRunning(true);
-    setStatus('连接字幕服务…', 'busy');
-    state.captions.root.classList.remove('hidden');
-    state.captions.clear();
+    const session = { kind, abort: new AbortController(), hasCaption: false,
+      stageMessage: kind === 'display' ? '选择带音频的标签页' : '加载日语样本' };
+    active = session;
+    setStatus('准备中', 'busy');
+    showMessage('');
+    updateView();
     try {
-      await ensureAudio();
-      if (!state.ws || state.ws.readyState !== 1) await connect();
-      if (kind === 'file') {
-        await startFile(url);
-        setStatus('播放内置日语样本', 'live');
-      } else {
-        await startDisplay();
-        setStatus('正在转写标签页声音', 'live');
-      }
-      state.statsTimer = setInterval(() => {
-        if (state.ws && state.ws.readyState === 1) state.ws.send(JSON.stringify({ type: 'stats' }));
-      }, 2000);
-    } catch (err) {
-      stop();
-      setStatus(err.message || String(err), 'err');
-    }
-  }
-
-  function stop() {
-    if (state.statsTimer) clearInterval(state.statsTimer);
-    if (state.source) {
-      try {
-        if (state.source.stream) state.source.stream.getTracks().forEach((t) => t.stop());
-        if (state.source.src) {
-          if (state.source.src.stop) state.source.src.stop();
-          state.source.src.disconnect();
+      if (kind === 'display') {
+        // Open the browser picker directly from the click before awaiting anything else.
+        const stream = await navigator.mediaDevices.getDisplayMedia({
+          video: true, audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        });
+        if (!isCurrent(session)) {
+          stream.getTracks().forEach(track => track.stop());
+          return;
         }
-      } catch (e) {}
-      state.source = null;
-    }
-    if (state.ws) {
-      state.ws.close();
-      state.ws = null;
-    }
-    setRunning(false);
-    setStatus('已停止');
-    if (state.captions) {
-      state.captions.clear();
-      state.captions.root.classList.add('hidden');
-    }
-    engineEl.textContent = '—';
-  }
-
-  function init() {
-    state.captions = window.JLS.createCaptionOverlay({ mount: document.body, showMeta: true });
-    state.captions.root.classList.add('hidden');
-
-    btnStart.addEventListener('click', () => start('display'));
-    btnStop.addEventListener('click', stop);
-    targetEl.addEventListener('change', () => {
-      if (state.ws && state.ws.readyState === 1) {
-        state.ws.send(JSON.stringify({ type: 'config', target: targetEl.value }));
-        state.currentId = null;
-        state.captions.clear();
+        session.stream = stream;
+        const track = stream.getAudioTracks()[0];
+        if (!track || track.readyState === 'ended') throw new Error('请重新选择标签页并勾选“分享标签页音频”');
+        track.addEventListener('ended', () => stop(session, '音频共享已结束'), { once: true });
       }
-    });
-    document.getElementById('link-file').addEventListener('click', (e) => {
-      e.preventDefault();
-      if (!state.capturing) start('file');
-    });
-
-    window.__jls = {
-      start,
-      stop,
-      state,
-      ready: false,
-      get captionText() {
-        return state.captions.captionText;
-      },
-    };
-
-    const qs = new URLSearchParams(location.search);
-    if (qs.get('autostart') === 'file') setTimeout(() => start('file'), 400);
+      setStatus('连接中', 'busy');
+      await connect(session, token);
+      requireCurrent(session);
+      await setupAudio(session);
+      if (kind === 'file') {
+        const response = await fetch(url || '/static/sample-ja.wav', { signal: session.abort.signal });
+        if (!response.ok) throw new Error('日语样本加载失败');
+        const buffer = await response.arrayBuffer();
+        requireCurrent(session);
+        const audio = await session.ctx.decodeAudioData(buffer);
+        requireCurrent(session);
+        const source = session.ctx.createBufferSource();
+        source.buffer = audio;
+        source.loop = true;
+        source.connect(session.node);
+        source.connect(session.ctx.destination);
+        source.start();
+        session.source = source;
+      } else {
+        session.source = session.ctx.createMediaStreamSource(session.stream);
+        session.source.connect(session.node);
+      }
+      session.stageMessage = '等待语音';
+      updateView();
+      setStatus(kind === 'file' ? '正在转写样本' : '正在转写', 'live');
+      session.statsTimer = setInterval(() => {
+        if (session.ws.readyState === WebSocket.OPEN) session.ws.send(JSON.stringify({ type: 'stats' }));
+      }, 2000);
+    } catch (error) {
+      if (isCurrent(session)) {
+        const cancelled = error.name === 'NotAllowedError' || error.name === 'AbortError';
+        stop(session, cancelled ? '未共享音频' : error.message || '无法开始字幕', !cancelled);
+      }
+    }
   }
 
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
-  else init();
+  function stop(session = active, message = '', error = false) {
+    if (!session || !isCurrent(session)) return;
+    active = null;
+    session.abort.abort();
+    session.cancelConnect?.();
+    clearInterval(session.statsTimer);
+    if (session.node) {
+      session.node.port.onmessage = null;
+      session.node.disconnect();
+    }
+    if (session.kind === 'file' && session.source) session.source.stop();
+    session.source?.disconnect();
+    session.stream?.getTracks().forEach(track => track.stop());
+    session.ws?.close();
+    session.ctx?.close().catch(() => {});
+    captions.clear();
+    captions.hide();
+    $('diagnostics').hidden = true;
+    setStatus(error ? '需要处理' : '已停止', error ? 'error' : 'idle');
+    showMessage(message, error);
+    updateView();
+  }
+
+  startButton.addEventListener('click', () => start('display'));
+  stopButton.addEventListener('click', () => stop());
+  sampleButton.addEventListener('click', () => start('file'));
+  target.addEventListener('change', () => {
+    try { localStorage.setItem(targetKey, target.value); } catch {}
+    updateTarget();
+    if (active?.ws?.readyState === WebSocket.OPEN) {
+      active.ws.send(JSON.stringify({ type: 'config', target: target.value }));
+      active.hasCaption = false;
+      captions.clear();
+      updateView();
+    }
+  });
+  window.addEventListener('pagehide', () => stop());
+  applySettings(prefs);
+  updateTarget();
+
+  window.__jls = {
+    start, stop: () => stop(),
+    get state() { return { capturing: !!active, source: active?.kind || null }; },
+    get captionText() { return captions.captionText; },
+  };
+  if (new URLSearchParams(location.search).get('autostart') === 'file') setTimeout(() => start('file'), 400);
 })();

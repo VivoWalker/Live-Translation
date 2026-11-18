@@ -60,7 +60,7 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((await ws.receive_json())['type'], 'pong')
 
     async def test_no_token_discovery_in_public_http(self):
-        for route in ('/', '/health', '/static/app.js'):
+        for route in ('/', '/health', '/static/app.js', '/static/caption-settings.js', '/static/interface.css'):
             async with self.client.get(self.server.make_url(route)) as response:
                 self.assertEqual(response.status, 200)
                 self.assertNotIn(TOKEN, await response.text())

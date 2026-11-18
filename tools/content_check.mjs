@@ -12,7 +12,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 const PORT = Number(process.env.JLS_CDP_PORT || 9343);
 const CHROME = process.env.JLS_CHROME || '/usr/bin/chromium';
-const SRC = ['caption-overlay.js', 'content.js'].map(name => readFileSync(resolve('extension', name), 'utf8')).join('\n');
+const SRC = ['caption-settings.js', 'caption-overlay.js', 'content.js'].map(name => readFileSync(resolve('extension', name), 'utf8')).join('\n');
 const SHOTS = process.argv.includes('--shot-dir') ? process.argv[process.argv.indexOf('--shot-dir') + 1] : null;
 const STRESS = process.argv.includes('--stress');
 const RESTART = process.argv.includes('--wasm');
@@ -274,9 +274,10 @@ try {
   assert.equal(await evaluate(`cap('.settings').hidden`), false, 'moving through the hover gap must not dismiss settings');
   await shot('settings');
   checks.push('hover strengthens only the background and reveals working style controls');
-  await evaluate(`for(const[key,value]of Object.entries({fontSize:30,width:72,background:12,color:'#fff1ce'})){const el=cap('[data-setting="'+key+'"]');el.value=value;el.dispatchEvent(new Event('input',{bubbles:true}))}`);
+  await evaluate(`for(const[key,value]of Object.entries({fontSize:30,sourceSize:19,width:72,background:12,color:'#fff1ce'})){const el=cap('[data-setting="'+key+'"]');el.value=value;el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}))}`);
   await sleep(400);
   assert.equal(await evaluate(`getComputedStyle(cap('.zh')).fontSize`), '30px');
+  assert.equal(await evaluate(`getComputedStyle(cap('.row .ja')).fontSize`), '19px');
   assert.equal(await evaluate(`cap('.wrap').classList.contains('dragging')`), false);
   await click('.settings-toggle');
   const handle = await evaluate(`(()=>{const r=cap('.drag').getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})()`);

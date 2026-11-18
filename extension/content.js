@@ -27,22 +27,17 @@
       case 'speech_start':
         u.show();
         u.start(ev.id);
-        u.setMeta('识别中…');
         break;
       case 'partial':
         u.text(ev.id, 'partial', ev.text);
-        u.setMeta('识别中 ' + (ev.t || 0).toFixed(1) + 's');
         break;
       case 'final':
         u.text(ev.id, 'final', ev.text);
-        u.setMeta('识别 ' + Math.round(ev.decode_ms || 0) + 'ms · 翻译中…');
         break;
-      case 'translation': {
+      case 'translation':
         u.translation(ev.id, ev.text, ev.final);
-        const eng = String(ev.engine || '').replace(':cache', '');
-        u.setMeta((ev.final ? '译 ' : '译稿 ') + eng + ' ' + (ev.ms ? Math.round(ev.ms) + 'ms' : '缓存'));
+        u.setMeta('');
         break;
-      }
       case 'error':
         if (ev.scope === 'translate') u.translationFailed(ev.id);
         u.show();
@@ -67,6 +62,8 @@
     }
     if (msg.type === 'jls:event') {
       handle(msg.event);
+    } else if (msg.type === 'jls:caption-settings-update' && sender.id === chrome.runtime.id) {
+      ensureUi().setSettings(msg.settings);
     } else if (msg.type === 'jls:clear') {
       if (ui) {
         ui.clear();
