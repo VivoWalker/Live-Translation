@@ -39,7 +39,7 @@ async def run(args):
     for index, clip in enumerate(dataset.clips):
         # Carry context through adjacent clips with the same documented source and program.
         domain = catalog.resolve("auto", title=clip.title)
-        context_key = (clip.source, domain.episode, domain.franchise)
+        context_key = (clip.recording or clip.source, domain.episode, domain.franchise)
         if context_key != previous_context:
             previous = ""
         previous_context = context_key

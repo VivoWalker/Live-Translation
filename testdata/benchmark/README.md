@@ -6,7 +6,8 @@
 
 ```json
 {
-  "version": 1,
+  "version": 2,
+  "dataset_version": "research-01",
   "name": "本地评估",
   "entity_catalog": ["藤田ことね"],
   "clips": [
@@ -15,9 +16,16 @@
       "audio": "clips/clip-01.wav",
       "source": "原始资料出处",
       "license": "适用许可与授权记录",
+      "usage_scope": "本地研究与质量评估",
+      "data_kind": "authorized_recording",
+      "recording": "original-broadcast-01",
+      "language": "ja",
+      "audio_sha256": "<本地音频的 SHA-256>",
+      "conditions": {"overlapping_speech": false, "background_music": null, "domain_terms": true},
       "tags": ["multi-speaker", "bgm", "domain-specific"],
       "title": "初星学園HR",
       "verified": true,
+      "annotation_source": "标注人员或经过核验的发布转录",
       "reference": "藤田ことねの話です。",
       "entities": ["藤田ことね"],
       "translations": {"zh": "在聊藤田琴音。", "en": "We're talking about Kotone Fujita."},
@@ -27,4 +35,4 @@
 }
 ```
 
-本地 PCM 输入限于清单目录内。每条最多 180 秒。无标注片段保留 `source` 与 `license`，省略对应参考字段。标签建议包括单人、多轮、语速快、背景音乐、重叠及长句。开发、审核和最终测试片段应分开，使用独立的录音来源或节目划分。
+音频路径限于清单目录内。每条最多 180 秒。v2 验证音频摘要并拒绝重复音频。无标注片段保留来源和使用权限，省略参考字段。条件未知时用 `null`，`data_kind` 可选 `synthetic`、`mock`、`public_recording` 或 `authorized_recording`。v1 清单可继续读取，报告将其来源标记为旧版。开发、审核和最终测试片段按原录音组分开，保留独立测试集。

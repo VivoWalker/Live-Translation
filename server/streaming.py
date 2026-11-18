@@ -86,6 +86,7 @@ class Stats:
             "audio_seconds": round(self.audio_seconds, 2),
             "audio_processed_seconds": round(self.audio_processed_samples / SAMPLE_RATE, 3),
             "decodes": self.decodes,
+            "decode_ms": round(self.decode_ms, 3),
             "avg_decode_ms": round(self.decode_ms / dec, 1),
             "rtf": round(self.decode_ms / 1000 / max(self.audio_seconds, 0.01), 4),
             "finals": self.finals,
