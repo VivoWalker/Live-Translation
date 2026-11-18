@@ -192,11 +192,13 @@ async function stressRealWasm() {
       for(let i=0;i<__audio.length;i+=1600)JLSEngine.feed(__audio.slice(i,i+1600));
       for(let i=0;i<16;i++)JLSEngine.feed(new Float32Array(1600));
       await new Promise(r=>setTimeout(r,50));const stats=JLSEngine.stats();if(restart)JLSEngine.stop();
-      return{...__engineCounts,audioSeconds:stats.audio_seconds,decodes:stats.decodes,wasmBytes:Module.HEAPU8.byteLength,blobURLs:__liveBlobURLs.size,loaderScripts:document.scripts.length};
+      const packageFiles=['/sense-voice.onnx','/silero_vad.onnx','/tokens.txt'].filter(path=>FS.analyzePath(path).exists).length;
+      return{...__engineCounts,audioSeconds:stats.audio_seconds,decodes:stats.decodes,wasmBytes:Module.HEAPU8.byteLength,packageFiles,blobURLs:__liveBlobURLs.size,loaderScripts:document.scripts.length};
     }})()`, 120000);
   for (let cycle = 0; cycle < (RESTART ? restartCycles : 0); cycle++) {
     const result = await evaluate('__realEngineCycle()', 120000);
     assert(result.finals > 0 && result.translations === result.finals, 'real WASM did not complete audio/translation');
+    assert.equal(result.packageFiles, 0, 'model files remain in the WASM filesystem after native setup');
     assert.equal(result.blobURLs, 0, 'model object URL remains registered');
     const point = { cycle, ...result, ...await memorySnapshot('wasm-' + cycle) };
     metrics.wasm.push(point);
@@ -209,7 +211,7 @@ async function stressRealWasm() {
     assert(last.wasmBytes - first.wasmBytes <= 32 * 1024 * 1024, 'native WASM allocations continue growing after warmup');
     assert(last.heapBytes - first.heapBytes <= 2 * 1024 * 1024, 'WASM wrapper heap continues growing');
     assert(last.nodes <= first.nodes + 8 && last.jsEventListeners <= first.jsEventListeners + 2, 'WASM loader DOM/listeners remain retained');
-    checks.push(`real SenseVoice WASM completes ${restartCycles} start/decode/stop cycles with released model URLs and stable post-warmup memory`);
+    checks.push(`real SenseVoice WASM completes ${restartCycles} start/decode/stop cycles without retaining model files`);
   }
   if (CONTINUOUS) {
     await evaluate('__startRealEngine()', 120000);
@@ -217,6 +219,7 @@ async function stressRealWasm() {
       let result;
       for (let sample = 0; sample < 8; sample++) result = await evaluate('__realEngineCycle(false)', 120000);
       assert(result.translations === result.finals && result.finals > 0);
+      assert.equal(result.packageFiles, 0);
       assert.equal(result.blobURLs, 0);
       const point = { ...result, ...await memorySnapshot('continuous-' + (block + 1) * 8) };
       metrics.continuous.push(point);

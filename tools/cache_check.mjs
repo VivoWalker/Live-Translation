@@ -37,13 +37,18 @@ const server = createServer((request, response) => {
     source.pipe(response);
   } else if (request.url === '/engine.js') {
     response.setHeader('Content-Type', 'application/javascript; charset=utf-8'); response.end(engine);
+  } else if (request.url === '/asr-domain.js' || request.url === '/asr-terms.json') {
+    const type = request.url.endsWith('.json') ? 'application/json' : 'application/javascript';
+    response.setHeader('Content-Type', type + '; charset=utf-8');
+    response.end(readFileSync(join(root, 'extension', request.url.slice(1))));
   } else if (request.url === '/wasm/sherpa-onnx-asr.js') {
     response.setHeader('Content-Type', 'application/javascript');
     response.end('class OfflineRecognizer { free() {} }');
   } else if (request.url === '/wasm/sherpa-onnx-vad.js') {
     response.setHeader('Content-Type', 'application/javascript'); response.end('function createVad() { return { free() {} }; }');
   } else if (request.url === '/wasm/sherpa-onnx-wasm-main-vad-asr.js') {
-    response.setHeader('Content-Type', 'application/javascript'); response.end('Module.onRuntimeInitialized();');
+    response.setHeader('Content-Type', 'application/javascript');
+    response.end('Module.FS_createDataFile = () => {}; Module.FS_unlink = () => {}; Module.onRuntimeInitialized();');
   } else if (request.url === '/') {
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
     response.end(`<!doctype html><script>
