@@ -134,6 +134,23 @@ async function checkPopupSizing() {
       if (scale === 1) {
         await evaluate(`document.querySelector('#asr-pack-mashiro').click()`);
         assert.deepEqual(await boxes(), ['asr-pack-mashiro']);
+      } else {
+        const configuration = await evaluate(`(() => {
+          document.querySelector('details.advanced').open = true;
+          const mode = document.querySelector('#engine');
+          mode.value = 'server-enhanced';
+          mode.dispatchEvent(new Event('change'));
+          const domain = document.querySelector('#domain-mode');
+          domain.value = 'auto';
+          domain.dispatchEvent(new Event('change'));
+          return { modes: Array.from(mode.options, option => option.value),
+            remoteVisible: !document.querySelector('#remote-field').hidden,
+            remoteOptIn: document.querySelector('#allow-remote').checked,
+            agentVisible: !document.querySelector('#agent-field').hidden,
+            packsHidden: document.querySelector('#asr-domain-field').hidden };
+        })()`);
+        assert.deepEqual(configuration, { modes: ['browser', 'server', 'server-enhanced'],
+          remoteVisible: true, remoteOptIn: false, agentVisible: true, packsHidden: true });
       }
       const layout = await evaluate(`(() => {
         const heading = document.querySelector('.popup-header h1');
@@ -150,6 +167,7 @@ async function checkPopupSizing() {
   }
   checks.push('popup requests its full width from a small initial viewport at 1× and 1.5× and keeps its footer visible');
   checks.push('popup migrates the former off setting and restores an individually selected word pack');
+  checks.push('enhanced popup exposes Agent and leaves remote audio unchecked');
 }
 async function stressCaptions() {
   await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });

@@ -90,6 +90,8 @@ JLS_CHROME=/path/to/chromium node tools/cache_check.mjs --model-dir /path/to/sen
 
 该工具使用临时浏览器配置与真实模型文件检查摘要、持久化和重开后的零模型下载；识别接口为桩，不连接翻译 API。`tools/browser_check.mjs` 用于服务演示页，需配置 `JLS_CHROME` 和 `JLSUBS_ACCESS_TOKEN`；完整扩展检查还要求浏览器允许加载未打包扩展。真实 `tabCapture` 链路需要用户点击授权，页面桩检查不代替这一步。
 
+开发分支完成 21 项 Chromium 界面、资源和 WASM 检查。约 595 秒连续识别产生 128 条 final 和 128 条测试译文。演示页用真实 AudioWorklet、认证 WebSocket 和 CPU 识别完成样本转写、mock 翻译、语言切换和停止。托管 Chromium 的管理员策略禁用了加载未打包扩展，工具栏 `tabCapture` 实装验收受此限制。
+
 ## 服务协议
 
 连接 `/ws` 后，第一条消息必须为 `{"type":"auth","token":"<访问令牌>"}`。认证成功后服务端发出 `ready`，客户端可发送 `{"type":"config","target":"zh"}`，以及 16 kHz、单声道、小端 float32 PCM 二进制帧。目标语言支持 `zh` / `en`。
