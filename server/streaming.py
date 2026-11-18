@@ -18,7 +18,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .asr import Capabilities, Recognition, RecognitionContext, SAMPLE_RATE, SileroVad, Recognizer
-from .asr_agent import Action, OptimizationAgent
+from .asr_agent import Action, Decision, OptimizationAgent
 from .asr_review import ReviewStore
 from .asr_router import DecodeScheduler
 from .conversation import CONTEXT_WINDOWS, ConversationContext, ConversationSnapshot, Glossary
@@ -150,6 +150,8 @@ class StreamSession:
         self._translation_slots = asyncio.Semaphore(TRANSLATION_CONCURRENCY)
         self._last_submitted_id = -1
         self.translation_epoch = 0
+        self._domain_epoch = 0
+        self._verification_task: asyncio.Task | None = None
         self._task: asyncio.Task | None = None
         self._closed = False
 
@@ -184,6 +186,8 @@ class StreamSession:
             return
         self._closed = True
         tasks = list(self._translations.values())
+        if self._verification_task is not None:
+            tasks.append(self._verification_task)
         if self._task is not None:
             tasks.append(self._task)
         for task in tasks:
@@ -257,6 +261,7 @@ class StreamSession:
 
     async def _decode(self, audio: np.ndarray, *, partial: bool = False) -> Recognition:
         t0 = time.perf_counter()
+        domain_epoch = self._domain_epoch
         try:
             recognize = getattr(self.asr, "recognize", None)
             if recognize:
@@ -275,7 +280,11 @@ class StreamSession:
         self._last_decode_ms = elapsed
         self.stats.decodes += 1
         self.stats.decode_ms += elapsed
-        return result if isinstance(result, Recognition) else Recognition(normalize_ja(result), result)
+        if isinstance(result, Recognition):
+            if domain_epoch != self._domain_epoch:
+                return Recognition(normalize_ja(result.original), result.original, result.timestamps)
+            return result
+        return Recognition(normalize_ja(result), result)
 
     async def set_target(self, target: str) -> None:
         if target == self.cfg.target_lang:
@@ -285,6 +294,7 @@ class StreamSession:
 
     def set_domain(self, selection: DomainSelection) -> None:
         if self.cfg.domain != selection:
+            self._domain_epoch += 1
             self.cfg.domain = selection
             self._reset_translations()
 
@@ -302,6 +312,8 @@ class StreamSession:
 
     def _reset_translations(self) -> None:
         self.translation_epoch += 1
+        if self._verification_task is not None:
+            self._verification_task.cancel()
         self.conversation.clear()
         self.last_translated_segment = None
         if isinstance(self.translator, TranslationPipeline):
@@ -318,7 +330,7 @@ class StreamSession:
                 "last_translated_segment": self.last_translated_segment}
 
     def agent_stats(self) -> dict:
-        return dict(self.agent.counts) if self.agent else {}
+        return self.agent.snapshot() if self.agent else {}
 
     async def _translate(self, seg_id: int, text: str, target: str, context: str | ConversationSnapshot, epoch: int,
                          deadline: float) -> None:
@@ -403,31 +415,43 @@ class StreamSession:
         self._last_forced_text = ""
         if len(audio) < SAMPLE_RATE * 0.3:
             return
+        domain_epoch = self._domain_epoch
         primary = await self._decode(audio)
         text = primary.text
-        if not text:
+        if not text or self._closed:
             return
         agent = self.agent
-        if agent:
+        verification_wait_ms = 0.0
+        if agent and domain_epoch == self._domain_epoch:
             seg_id, epoch, domain = self._seg_id, self.translation_epoch, self.cfg.domain
 
             def provisional(hypothesis):
                 self._emit({"type": "partial", "id": seg_id, "text": hypothesis, "stable": "",
                             "stage": "verification", "t": round(audio_end_ratio, 2)})
 
+            started = time.perf_counter()
+            task = self._verification_task = asyncio.create_task(agent.optimize(
+                primary, domain, audio, forced=forced, backlog=self._queued_bytes >= PREVIEW_BACKLOG,
+                provisional=provisional))
             try:
-                decision = await agent.optimize(primary, domain, audio, forced=forced,
-                                                backlog=self._queued_bytes >= PREVIEW_BACKLOG, provisional=provisional)
-                if epoch == self.translation_epoch and self.agent is agent:
-                    text = decision.text
-                    if self.review and (decision.action != Action.ACCEPT_ORIGINAL or primary.changes):
-                        try:
-                            self.review.record(self._review_session, seg_id, primary, decision,
-                                               (domain.episode or domain.franchise) if domain else "")
-                        except (OSError, sqlite3.Error):
-                            agent.counts["audit_failures"] += 1
-            except Exception:
-                agent.counts["failures"] += 1
+                (decision,) = await asyncio.gather(task, return_exceptions=True)
+            finally:
+                self._verification_task = None
+            verification_wait_ms = (time.perf_counter() - started) * 1000
+            if self._closed:
+                return
+            if domain_epoch != self._domain_epoch:
+                text = normalize_ja(primary.original)
+            elif isinstance(decision, Decision) and epoch == self.translation_epoch and self.agent is agent:
+                text = decision.text
+                if self.review and (decision.action != Action.ACCEPT_ORIGINAL or primary.changes):
+                    try:
+                        self.review.record(self._review_session, seg_id, primary, decision,
+                                           (domain.episode or domain.franchise) if domain else "")
+                    except (OSError, sqlite3.Error):
+                        agent.counts["audit_failures"] += 1
+            elif isinstance(decision, Exception):
+                agent.counts["decision_failures"] += 1
         text = trim_overlap(overlap_text, text)
         if forced:
             self._last_forced_text = text
@@ -441,6 +465,7 @@ class StreamSession:
                 "t_start": round(max(0, audio_end_ratio - len(audio) / SAMPLE_RATE), 2),
                 "forced": forced,
                 "decode_ms": round(self._last_decode_ms, 1),
+                "verification_wait_ms": round(verification_wait_ms, 3),
             }
         )
         self._schedule_translation(self._seg_id, text)

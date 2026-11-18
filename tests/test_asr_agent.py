@@ -1,6 +1,7 @@
 import asyncio
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,10 +10,11 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 
 from server.asr import Recognition
-from server.asr_agent import Action, OptimizationAgent
+from server.asr_agent import Action, OptimizationAgent, refine_offline
 from server.asr_domain import EpisodeTerm
 from server.asr_review import ReviewStore, candidates, validate_candidates
 from server.asr_router import DecodeScheduler
+from server.asr_verification import VerificationController, VerificationPolicy
 from server.episodes import DomainSelection
 from server.streaming import SessionConfig, StreamSession
 from server.translate import MockTranslator, TranslationPipeline
@@ -25,6 +27,11 @@ DOMAIN = DomainSelection("auto", episode="例の番組", terms=(
 BASELINE = "なつぞらたろうさんです。"
 VERIFIED = "夏空太郎さんです。"
 AUDIO = np.full(8000, .1, dtype=np.float32)
+PRIMARY = Recognition(BASELINE, BASELINE)
+
+
+async def optimize(agent, *, backlog=False):
+    return await agent.optimize(PRIMARY, DOMAIN, AUDIO, forced=False, backlog=backlog, provisional=lambda _: None)
 
 
 class AgentTests(unittest.IsolatedAsyncioTestCase):
@@ -69,8 +76,131 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([(event["type"], event["id"]) for event in events],
                          [("partial", 0), ("final", 0), ("translation", 0)])
         self.assertEqual(events[1]["text"], BASELINE)
-        self.assertEqual(agent.counts["timeouts"], 1)
+        self.assertEqual(agent.counts["secondary_timeouts"], 1)
         await asyncio.sleep(0)
+
+    async def test_mock_inference_100_and_450_ms_completes_within_policy(self):
+        for latency in (.1, .45):
+            with self.subTest(latency=latency):
+                def transcribe(_):
+                    time.sleep(latency)
+                    return VERIFIED
+                agent = OptimizationAgent(DecodeScheduler(), SimpleNamespace(transcribe=transcribe), budget_ms=1100)
+                self.assertEqual((await optimize(agent)).text, VERIFIED)
+                stats = agent.snapshot()
+                self.assertEqual((stats["secondary_attempts"], stats["secondary_completions"]), (1, 1))
+                self.assertEqual(stats["secondary_correction_acceptance_rate"], 1)
+                self.assertGreaterEqual(stats["secondary_inference_p95_ms"], latency * 1000)
+
+    async def test_slow_2_and_20_second_models_cannot_queue_or_delay_other_primary_decode(self):
+        for latency in (2, 20):
+            with self.subTest(latency=latency):
+                primary, verifier = DecodeScheduler(), DecodeScheduler()
+                policy = VerificationController(verifier, VerificationPolicy(80), primary=primary)
+                entered, release, completed = asyncio.Event(), threading.Event(), asyncio.Event()
+                loop = asyncio.get_running_loop()
+
+                def transcribe(_):
+                    loop.call_soon_threadsafe(entered.set)
+                    release.wait(latency)
+                    loop.call_soon_threadsafe(completed.set)
+                    return VERIFIED
+
+                model = SimpleNamespace(transcribe=transcribe)
+                owner = OptimizationAgent(verifier, model, controller=policy)
+                peer = OptimizationAgent(verifier, model, controller=policy)
+                task = asyncio.create_task(optimize(owner))
+                try:
+                    await asyncio.wait_for(entered.wait(), 1)
+                    outcomes = await asyncio.gather(*(optimize(peer) for _ in range(12)))
+                    self.assertEqual({decision.reason for decision in outcomes}, {"verification_secondary_busy"})
+                    self.assertEqual((peer.counts["secondary_attempts"], verifier.waiting), (0, 0))
+                    self.assertEqual(await primary.run(lambda: "latest primary"), "latest primary")
+                    self.assertEqual((await task).reason, "verification_timeout")
+                    self.assertFalse(verifier.idle)
+                    self.assertEqual(owner.snapshot()["secondary_timeout_rate"], 1)
+                finally:
+                    release.set()
+                    await asyncio.wait_for(completed.wait(), 1)
+                await asyncio.wait_for(verifier.run(lambda: None), 1)
+                self.assertTrue(verifier.idle)
+                self.assertEqual(owner.counts["secondary_completions"], 1)
+
+    async def test_backend_timeout_error_is_inference_failure(self):
+        secondary = SimpleNamespace(transcribe=MagicMock(side_effect=TimeoutError("backend")))
+        agent = OptimizationAgent(DecodeScheduler(), secondary)
+        self.assertEqual((await optimize(agent)).reason, "verification_failed")
+        self.assertEqual((agent.counts["secondary_failures"], agent.counts["secondary_timeouts"]), (1, 0))
+
+    async def test_policy_uses_model_defaults_recent_inference_and_primary_priority(self):
+        qwen = SimpleNamespace(name="qwen3-asr-1.7b")
+        live, offline = VerificationPolicy.for_model(qwen), VerificationPolicy.for_model(qwen, mode="offline")
+        now = [100]
+        budget = SimpleNamespace(consume=lambda _: True)
+        decoder = DecodeScheduler()
+        controller = VerificationController(decoder, live)
+        self.assertEqual(controller.admit(.5, backlog=False), "model_offline_preferred")
+        self.assertEqual(offline.budget_ms, 60_000)
+        live = VerificationPolicy.for_model(qwen, budget_ms=500)
+        controller = VerificationController(decoder, live, rate=budget, clock=lambda: now[0])
+        self.assertEqual(controller.admit(.5, backlog=True), "primary_backlog")
+        self.assertIsNone(controller.admit(.5, backlog=False))
+        controller.observe(.5, 800)
+        controller.timeout()
+        self.assertEqual(controller.admit(.5, backlog=False), "predicted_over_budget")
+        now[0] += 61
+        self.assertIsNone(controller.admit(.5, backlog=False))
+        controller.timeout()
+        self.assertEqual(controller.admit(.5, backlog=False), "timeout_cooldown")
+        now[0] += 61
+        self.assertIsNone(controller.admit(.5, backlog=False))
+        controller.completed_in_budget()
+        self.assertEqual(controller.consecutive_timeouts, 0)
+
+    async def test_stopping_during_verification_cannot_publish_into_new_session(self):
+        loop = asyncio.get_running_loop()
+        entered, release = asyncio.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def slow(_):
+            loop.call_soon_threadsafe(entered.set)
+            release.wait(2)
+            return VERIFIED
+
+        verifier = DecodeScheduler()
+        controller = VerificationController(verifier, VerificationPolicy(1000))
+        asr, secondary = SimpleNamespace(transcribe=lambda _: BASELINE), SimpleNamespace(transcribe=slow)
+        old_events, new_events = [], []
+        with patch("server.streaming.SileroVad"):
+            old = StreamSession(asr, TranslationPipeline(MockTranslator()), old_events.append,
+                                SessionConfig(domain=DOMAIN), agent=OptimizationAgent(verifier, secondary, controller=controller))
+            new = StreamSession(asr, TranslationPipeline(MockTranslator()), new_events.append,
+                                SessionConfig(domain=DOMAIN), agent=OptimizationAgent(verifier, secondary, controller=controller))
+        self.addAsyncCleanup(old.close)
+        self.addAsyncCleanup(new.close)
+        late = asyncio.create_task(old._finalize(AUDIO, .5))
+        await asyncio.wait_for(entered.wait(), 1)
+        await old.close()
+        await late
+        await new._finalize(AUDIO, .5)
+        await new._translations[0]
+        release.set()
+        await verifier.run(lambda: None)
+        self.assertEqual([event["type"] for event in old_events], ["partial"])
+        self.assertEqual([(event["type"], event["id"]) for event in new_events], [("final", 0), ("translation", 0)])
+        self.assertEqual(new_events[0]["text"], BASELINE)
+
+    async def test_offline_consensus_falls_back_on_disagreement(self):
+        decoder = DecodeScheduler()
+
+        def agent(text):
+            controller = VerificationController(decoder, VerificationPolicy(1000, "offline"))
+            return OptimizationAgent(decoder, SimpleNamespace(transcribe=lambda _: text), controller=controller)
+
+        result = await refine_offline(PRIMARY, DOMAIN, AUDIO, [agent(VERIFIED), agent(BASELINE)])
+        self.assertEqual((result.text, result.reason), (BASELINE, "offline_model_disagreement"))
+        result = await refine_offline(PRIMARY, DOMAIN, AUDIO, [agent(VERIFIED), agent(VERIFIED)])
+        self.assertEqual((result.text, result.action), (VERIFIED, Action.ACCEPT_CORRECTION))
 
     async def test_review_and_holdout_gate_require_positive_evidence_with_no_regression(self):
         agent = OptimizationAgent(DecodeScheduler(), SimpleNamespace(transcribe=lambda _: VERIFIED))

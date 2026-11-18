@@ -37,6 +37,7 @@ sys.path.insert(0, str(ROOT))
 
 from server.asr import BackendUnavailable, Capabilities, PROVIDERS, Recognizer, create_recognizer  # noqa: E402
 from server.asr_agent import OptimizationAgent  # noqa: E402
+from server.asr_verification import VerificationController, VerificationPolicy  # noqa: E402
 from server.asr_review import ReviewStore  # noqa: E402
 from server.conversation import CONTEXT_WINDOWS, Glossary  # noqa: E402
 from server.asr_router import DecodeScheduler, select_recognizer  # noqa: E402
@@ -59,7 +60,7 @@ class AppState:
         self, asr: Recognizer, translator: TranslationPipeline, *,
         access_token: str | None = None, allowed_hosts: set[str] | None = None, vad: VadSettings = VadSettings(),
         fallback_from: str | None = None, episodes: EpisodeCatalog | None = None,
-        agent_enabled: bool = False, secondary: Recognizer | None = None, agent_budget_ms: int = 450,
+        agent_enabled: bool = False, secondary: Recognizer | None = None, agent_budget_ms: int | None = None,
         review: ReviewStore | None = None,
         context_turns: int = 1, glossary: Glossary | None = None,
     ):
@@ -68,11 +69,11 @@ class AppState:
         self.vad = vad
         self.decoder = DecodeScheduler()
         self.verifier = DecodeScheduler()
-        self.verification_rate = RateBudget(.2, 1)
+        self.verification = VerificationController(
+            self.verifier, VerificationPolicy.for_model(secondary, budget_ms=agent_budget_ms), primary=self.decoder)
         self.agent_enabled = agent_enabled
         self.asr_mode = getattr(asr, "mode", "fast")
         self.secondary = secondary
-        self.agent_budget_ms = agent_budget_ms
         self.review = review
         self.context_turns = context_turns
         self.glossary = glossary or Glossary.load()
@@ -104,8 +105,7 @@ class AppState:
 
     def new_agent(self) -> OptimizationAgent | None:
         if self.agent_enabled:
-            return OptimizationAgent(self.verifier, self.secondary, budget_ms=self.agent_budget_ms,
-                                     rate=self.verification_rate)
+            return OptimizationAgent(self.verifier, self.secondary, controller=self.verification)
         return None
 
 
@@ -384,7 +384,8 @@ def main() -> int:
     ap.add_argument("--agent-model-dir", default=cfg.get("agent_model_dir"))
     ap.add_argument("--agent-device", choices=("cpu", "cuda"), default=cfg.get("agent_device", "cpu"))
     ap.add_argument("--agent-precision", default=cfg.get("agent_precision"))
-    ap.add_argument("--agent-budget-ms", type=int, default=cfg.get("agent_budget_ms", 450))
+    ap.add_argument("--agent-budget-ms", type=int, default=cfg.get("agent_budget_ms"),
+                    help="Override the model-specific live deadline (100–1500 ms)")
     ap.add_argument("--agent-audit", default=cfg.get("agent_audit"), help="Opt in to a local SQLite review file")
     ap.add_argument("--dev-assets", action="store_true", help="Expose non-secret development test pages")
     ap.add_argument("--allow-host", action="append", default=[], help="Additional trusted HTTP hostname (no scheme or port)")
@@ -397,7 +398,7 @@ def main() -> int:
 
     api_key = os.environ.get("DEEPSEEK_API_KEY") or cfg.get("deepseek_api_key")
     try:
-        if not 100 <= args.agent_budget_ms <= 1500:
+        if args.agent_budget_ms is not None and not 100 <= args.agent_budget_ms <= 1500:
             raise ValueError("Agent budget must be between 100 and 1500 ms")
         vad = VadSettings(args.vad_min_silence, args.vad_max_segment, args.vad_overlap)
         episodes = EpisodeCatalog(args.episode_catalog)
