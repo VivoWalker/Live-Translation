@@ -1,0 +1,10 @@
+[
+  {"title":"BanG Dream! とのコラボ 【学マス】初星学園ＨＲ","match":"episode","packs":["gakumas"]},
+  {"title":"【ＢａｎＧ Ｄｒｅａｍ】配信","match":"franchise","packs":["bandori"]},
+  {"title":"BanG Dream! × ラブライブ","match":"ambiguous","packs":[]},
+  {"title":"I love live music","match":"unmatched","packs":[]},
+  {"title":"nogakumas_news","match":"unmatched","packs":[]},
+  {"title":"雑談ラジオ","manual":["mashiro"],"general":true,"match":"manual_fallback","packs":["mashiro"],"raw":"日高真白さんと水瀬いのりさん","text":"陽高真白さんと水瀬いのりさん"},
+  {"title":"雑談ラジオ","general":true,"match":"general_fallback","packs":["general"],"raw":"配信でスパ茶ありがとう。選手はみなせいのり。","text":"配信でスパチャありがとう。選手はみなせいのり。"},
+  {"title":"雑談ラジオ","general":true,"match":"general_fallback","packs":["general"],"raw":"面限を買った。リア体の話。","text":"面限を買った。リア体の話。"}
+]

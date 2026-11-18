@@ -25,8 +25,12 @@ class DecodeScheduler:
         self.slot = asyncio.Semaphore(1)
         self.waiting = 0
 
+    @property
+    def idle(self):
+        return not self.slot.locked() and self.waiting == 0
+
     async def run(self, decode, *args, optional=False):
-        if optional and self.slot.locked():
+        if optional and not self.idle:
             return None
         if self.waiting >= MAX_CONNECTIONS:
             raise RuntimeError("ASR inference backlog exceeded")

@@ -5,13 +5,16 @@
 ```sh
 python -m pip install -r requirements.txt -r requirements/benchmark.txt
 python tools/import_benchmark.py out/clips --output out/manifest.json --name "研究样本" \
-  --labels out/checked-transcripts.txt --source "来源" --license "本地评估授权"
+  --labels out/checked-transcripts.txt --annotation-source "核验人" --source "来源" \
+  --license "记录授权" --usage-scope "本地评估" --kind authorized_recording --recording "录音组"
 python tools/benchmark.py asr out/manifest.json --threads 2 \
   --model sensevoice=/path/to/sensevoice-onnx --model whisper=/path/to/whisper-base --output out/asr.json
 python tools/benchmark_vad.py out/manifest.json --output out/vad.json
 ```
 
 每个模型单独启动进程，使用相同文件、音频转换、线程数、词包和预热次数。报告包含清单及音频的 SHA-256、实际设备、精度、模型、加载时间和 CPU/GPU 环境。默认关闭词包，启用时用 `--packs` 审计选项。默认报告只保留指标。明确需要比较具体输出时可加 `--include-text`。 [清单格式](../testdata/benchmark/README.md)
+
+普通 PR 跑一次 `python tools/benchmark_mock.py --wire`，使用合成 PCM、实际认证 WebSocket 和本地桩。GitHub Actions 每周另外跑 `--minutes 10`。本地可用 `--minutes 30` 或 `--minutes 60` 加速压测单个会话，报告丢句、重复 ID、队列、缓存、进程 CPU 和可用时的 RSS。该检查按音频时长计量，以更快速度送入队列。
 
 ## 指标
 
@@ -23,6 +26,8 @@ python tools/benchmark_vad.py out/manifest.json --output out/vad.json
 | 实体 | 对预设术语表执行最长不重叠字面匹配，按出现次数报告 Precision、Recall 和 F1 |
 | ASR RTF | 识别阶段耗时之和除以音频时长，预热和载入独立统计 |
 | 内存 | RSS 每 0.5 秒采样。可用时以 `nvidia-smi` 采样进程显存 |
+| 复查与端到端 | 分别统计 final 前 Agent 等待时间和音频端点到同 ID 译文的 P50/P95 |
+| 纠错影响 | 规范化 CER 净收益为基线 CER 减修订 CER。误改率是编辑距离上升的片段数除以有参考且发生修改的片段数 |
 | VAD | 在同一最终识别路径扫描 9 组静音与时长设置，报告输出数、强制切分和以音频采样点计的检测延迟 |
 | 翻译 | 使用 SacreBLEU chrF 对独立中英译文评估，并报告缺失比例 |
 | DER | 零宽容边界，整段音频计分，保留重叠说话 |
@@ -42,6 +47,24 @@ python tools/benchmark.py diarization out/manifest.json --predictions out/turns.
 每条音频通过新认证会话按 100 ms PCM 实时送入。主机停顿后从实际发送时刻继续定速。finalization 延迟从发送包含音频端点的帧到接收 final，翻译延迟从接收 final 到收到同一 ID 的译文，P50/P95 使用最近秩。丢失率比较服务器统计的 final 与完整接收的 final，无法取得最终统计的连接单独报告关闭状态。译文缺失率以实际收到的 final 为分母。报告记录积压、异常后新会话恢复和服务进程 RSS。浏览器持续运行使用独立的 Chromium 检查。 [浏览器验证](development.md)
 
 译文预测文件是按片段 ID 索引的 JSON 字符串对象。说话人预测按同样 ID 索引区间数组。录播 DER 需要安装说话人评估依赖。测试样本的领域、硬件、词包或流程变化后，应以新的报告为准。
+
+### 五组对照
+
+在同一 SenseVoice 服务上使用同一清单、设备、线程数、目标语言和 1 倍播放速度。配置已独立加载的第二模型后，用 `python tools/benchmark.py stream out/manifest.json --score --include-text --output out/<组>.json` 加上各组参数。选择 `--include-text` 时，报告包含本地台词，请与评估数据一同保管。
+
+| 组 | 参数 |
+| --- | --- |
+| 原始输出 | `--domain off --agent off --context-turns 1` |
+| 固定词表 | `--domain manual --packs gakumas --agent off --context-turns 1` |
+| 动态词表 | `--domain auto --agent off --context-turns 1` |
+| 动态词表和复查 | `--domain auto --agent on --context-turns 1` |
+| 上述复查和多轮翻译 | `--domain auto --agent on --context-turns 3` |
+
+```sh
+python tools/benchmark.py compare out/manifest.json --baseline out/raw.json --corrected out/agent.json
+```
+
+比较命令校验同版音频、完整会话、目标语言和播放速度。只有有独立参考的片段计入 CER、WER、实体指标和误改率。对于有实际翻译凭据的评估，`--score` 在存在独立中英参考时计算 chrF。上表的多轮实验仍使用每条音频一个会话，跨轮语料需包含在同一音频中。复查率、等待超时率、采纳率、译文缺失率和队列溢出可在无参考时报告。实时 ASR RTF 以服务累计解码等待与推理时间除以实际接收的音频总时长，含尾部静音。独立 ASR RTF 使用每条未补静音的音频时长。
 
 ## 实测样本
 

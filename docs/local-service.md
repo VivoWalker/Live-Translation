@@ -11,7 +11,7 @@
 ### Windows PowerShell
 
 ```powershell
-py -3 -m venv .venv
+py -3.12 -m venv .venv
 .\.venv\Scripts\python -m pip install --upgrade pip
 .\.venv\Scripts\python -m pip install -r requirements.txt
 Copy-Item config.example.json config.local.json
@@ -103,7 +103,8 @@ python -m server.app --threads 2
 | 识别模型路径 | `model_dir` / `--model-dir` | 按所选引擎查找 `models/` |
 | 专名词库 | `asr_packs` / `--asr-packs` | 默认启用全部，[词库 ID 和旧配置说明](asr-domain.md#使用) |
 | 自定义词表 | `asr_terms` / `--asr-terms` | 内置词表 |
-| 翻译器 | `translator` / `--translator` / `JLSUBS_TRANSLATOR` | 配置示例为 `deepseek`；无配置为 `auto` |
+| 翻译器 | `translator` / `--translator` / `JLSUBS_TRANSLATOR` | `auto` |
+| 自动回退 | `auto_domain_packs` / `--auto-domain-packs`，`auto_domain_general` / `--auto-domain-general` | 无回退词包 |
 | DeepSeek Key | `deepseek_api_key` / `DEEPSEEK_API_KEY` | 用户提供 |
 | DeepSeek 模型 | `DEEPSEEK_MODEL` | `deepseek-chat` |
 | DeepSeek 地址 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` |
@@ -132,7 +133,9 @@ Whisper 的预览至少等待 2 秒语音，间隔至少 2 秒；解码慢时进
 
 ## 可选识别后端
 
-扩展的本地快速与本地增强都连接操作方启动的服务。SenseVoice、Whisper Base 和 Parakeet 可作为快速模式的后端，Whisper Turbo 和 Qwen3-ASR 作为增强后端。弹窗显示本次连接的实际模型或回退状态。高级设置可选择是否请求 Agent 和多轮翻译，服务通过 `--agent` 提供复查能力。
+扩展的本地快速与本地增强都连接操作方启动的服务。SenseVoice、Whisper Base 和 Parakeet 可作为快速模式的后端，Whisper Turbo 和 Qwen3-ASR 作为增强后端。弹窗显示请求与服务实际模式、当前模型、启动回退及第二 ASR 的可用情况。更换模型时需以新配置重启服务，再开始字幕。
+
+启用服务的 `--agent` 并指定独立 `--agent-secondary` 后，客户端可请求复查。直播默认最多加载一个 CUDA ASR 后端，CPU Turbo 和 Qwen 默认使用离线工具。第二模型加载失败时，主模型仍可识别和翻译。 [预算和离线修订](agentic-asr.md)
 
 使用官方模型或已核验来源的转换制品，将权重预先下载到本机目录。安装所选后端的依赖后再启动服务。下例仅说明配置，CUDA 需按上游说明安装对应的运行时。
 

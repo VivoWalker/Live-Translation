@@ -2,6 +2,7 @@
 import json
 import tempfile
 import unittest
+from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +12,7 @@ from server.asr import SAMPLE_RATE, SenseVoiceRecognizer, WhisperRecognizer
 from server.asr_domain import BUILTIN, PACKS, DomainCorrector
 
 CASES = json.loads((Path(__file__).parent / 'fixtures/asr_domain_cases.json').read_text())
+EVIDENCE_CASES = json.loads((Path(__file__).parent / 'fixtures/asr_domain_evidence.json').read_text())
 
 
 class DomainTests(unittest.TestCase):
@@ -44,10 +46,36 @@ class DomainTests(unittest.TestCase):
             corrector = DomainCorrector([pack])
             for entry in data['entries']:
                 for alias in entry['aliases']:
-                    text, requires = (alias, entry.get('requires')) if isinstance(alias, str) else (alias['text'], alias.get('requires', entry.get('requires')))
+                    rule = {'text': alias} if isinstance(alias, str) else alias
+                    text, requires = rule['text'], rule.get('requires', entry.get('requires'))
                     cue = data['cues'][requires[0]][0] + '、' if requires else ''
                     with self.subTest(pack=pack, alias=text):
-                        self.assertEqual(corrector.correct(cue + text), cue + entry['term'])
+                        corrected, _, candidates = corrector.inspect(cue + text)
+                        if rule.get('candidate'):
+                            self.assertEqual(corrected, cue + text)
+                            self.assertEqual((candidates[0].canonical, candidates[0].level), (entry['term'], 3))
+                        else:
+                            self.assertEqual(corrected, cue + entry['term'])
+
+    def test_shared_evidence_contract(self):
+        from server.episodes import EpisodeCatalog
+
+        catalog = EpisodeCatalog()
+        for case in EVIDENCE_CASES:
+            with self.subTest(case=case["raw"]):
+                corrector = catalog.resolve("auto", title=case["title"]).corrector if "title" in case else DomainCorrector(case["packs"])
+                text, changes, candidates = corrector.inspect(case["raw"])
+                self.assertEqual({"text": text, "changes": [asdict(change) for change in changes],
+                                  "candidates": [asdict(candidate) for candidate in candidates]}, case["expected"])
+
+    def test_unverified_custom_entries_cannot_be_upgraded_by_an_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "terms.json"
+            path.write_text(json.dumps({"version": 1, "cues": {}, "entries": [{
+                "term": "新候補", "verified": False, "aliases": [{"text": "元表記", "verified": True}]
+            }]}))
+            text, changes, candidates = DomainCorrector(path=path).inspect("元表記")
+        self.assertEqual((text, changes, candidates[0].verified), ("元表記", (), False))
 
     def test_custom_file_validates_size_schema_and_alias_conflicts(self):
         with tempfile.TemporaryDirectory() as tmp:

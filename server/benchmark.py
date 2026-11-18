@@ -7,7 +7,7 @@ import math
 import re
 import unicodedata
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .diarization import SpeakerTurn
@@ -15,6 +15,8 @@ from .text import edit_distance
 
 MAX_CLIP_SECONDS = 180
 MAX_ITEMS = 1000
+DATA_KINDS = ("synthetic", "mock", "public_recording", "authorized_recording")
+CONDITIONS = ("overlapping_speech", "background_music", "domain_terms")
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,13 @@ class Clip:
     speakers: tuple[SpeakerTurn, ...]
     tags: tuple[str, ...]
     title: str
+    audio_sha256: str = ""
+    language: str = "ja"
+    data_kind: str = "legacy"
+    usage_scope: str = ""
+    conditions: dict[str, bool | None] = field(default_factory=dict)
+    annotation_source: str = ""
+    recording: str = ""
 
 
 @dataclass(frozen=True)
@@ -37,6 +46,11 @@ class Dataset:
     digest: str
     clips: tuple[Clip, ...]
     entity_catalog: tuple[str, ...]
+    version: str = "legacy"
+
+    def provenance(self):
+        return {"dataset_version": self.version, "data_kinds": dict(Counter(clip.data_kind for clip in self.clips)),
+                "verified_transcripts": sum(clip.reference is not None for clip in self.clips)}
 
 
 def _bounded(value, size=1024):
@@ -74,14 +88,19 @@ def load_dataset(path: Path) -> Dataset:
     import soundfile as sf
 
     data = load_json(path)
-    if not isinstance(data, dict) or data.get("version") != 1 or not _bounded(data.get("name"), 120):
+    if (not isinstance(data, dict) or type(data.get("version")) is not int or data["version"] not in (1, 2)
+            or not _bounded(data.get("name"), 120)):
         raise ValueError("Invalid benchmark manifest")
+    audited = data["version"] == 2
+    version = data.get("dataset_version") if audited else "legacy"
+    if not _bounded(version, 120):
+        raise ValueError("Missing dataset version")
     items, catalog = data.get("clips"), data.get("entity_catalog", [])
     if not isinstance(items, list) or not 0 < len(items) <= MAX_ITEMS or not _strings(catalog, 500):
         raise ValueError("Invalid clips or entity catalog")
     digest = hashlib.sha256(json.dumps(data, ensure_ascii=False, sort_keys=True).encode())
     root = path.resolve().parent
-    seen, clips = set(), []
+    seen, hashes, clips = set(), set(), []
     for row in items:
         if not isinstance(row, dict):
             raise ValueError("Invalid benchmark clip")
@@ -92,28 +111,47 @@ def load_dataset(path: Path) -> Dataset:
         audio = (root / name).resolve()
         if not audio.is_relative_to(root) or not audio.is_file() or audio.stat().st_size > 128 * 1024 * 1024:
             raise ValueError(f"Invalid local audio for clip {clip_id}")
-        if not 0 < sf.info(audio).duration <= MAX_CLIP_SECONDS:
+        info = sf.info(audio)
+        if not 0 < info.duration <= MAX_CLIP_SECONDS or info.frames * info.channels > 32_000_000:
             raise ValueError(f"Invalid duration for clip {clip_id}")
         with audio.open("rb") as file:
-            digest.update(hashlib.file_digest(file, "sha256").digest())
+            audio_hash = hashlib.file_digest(file, "sha256")
+        fingerprint = audio_hash.hexdigest()
+        if audited and row.get("audio_sha256") != fingerprint:
+            raise ValueError(f"Audio SHA-256 mismatch for clip {clip_id}")
+        if fingerprint in hashes:
+            raise ValueError(f"Duplicate audio for clip {clip_id}")
+        hashes.add(fingerprint)
+        digest.update(audio_hash.digest())
 
         source, license_name = row.get("source"), row.get("license")
         if not _bounded(source) or not _bounded(license_name):
             raise ValueError(f"Missing provenance for clip {clip_id}")
         reference, translations = row.get("reference"), row.get("translations", {})
         entities, speakers = row.get("entities"), _speaker_turns(row.get("speakers", []))
-        if ((reference is not None and not _bounded(reference, 8192)) or not isinstance(translations, dict)
+        labeled = reference is not None or translations or entities is not None or speakers
+        if ((reference is not None and (not _bounded(reference, 8192) or not normalize_for_cer(reference)))
+                or not isinstance(translations, dict)
                 or any(target not in ("zh", "en") or not _bounded(text, 8192) for target, text in translations.items())
                 or entities is not None and (not _strings(entities) or any(term not in catalog for term in entities))
-                or ((reference is not None or translations or entities is not None or speakers)
-                    and row.get("verified") is not True)):
+                or (labeled and row.get("verified") is not True)):
             raise ValueError(f"Missing verification or invalid labels for clip {clip_id}")
         tags, title = row.get("tags", []), row.get("title", "")
         if not _strings(tags, 16) or not isinstance(title, str) or len(title) > 240:
             raise ValueError(f"Invalid metadata for clip {clip_id}")
+        kind, usage, conditions, annotator, recording = "legacy", "", {}, "", ""
+        if audited:
+            kind, usage = row.get("data_kind"), row.get("usage_scope")
+            conditions, annotator, recording = row.get("conditions"), row.get("annotation_source", ""), row.get("recording")
+            if (row.get("language") != "ja" or kind not in DATA_KINDS or not _bounded(usage) or not _bounded(recording, 160)
+                    or not isinstance(conditions, dict) or set(conditions) != set(CONDITIONS)
+                    or not all(value is None or type(value) is bool for value in conditions.values())
+                    or ((labeled or "annotation_source" in row) and not _bounded(annotator))):
+                raise ValueError(f"Invalid v2 provenance or conditions for clip {clip_id}")
         clips.append(Clip(clip_id, audio, source, license_name, reference, translations,
-                          tuple(entities) if entities is not None else None, speakers, tuple(tags), title))
-    return Dataset(data["name"], digest.hexdigest(), tuple(clips), tuple(catalog))
+                          tuple(entities) if entities is not None else None, speakers, tuple(tags), title, fingerprint,
+                          "ja", kind, usage, conditions, annotator, recording))
+    return Dataset(data["name"], digest.hexdigest(), tuple(clips), tuple(catalog), version)
 
 
 def normalize_for_cer(text):
@@ -161,6 +199,28 @@ def score_asr(dataset, predictions, *, tokenize=None):
             "cer_nfkc_no_spaces": rate(norm_edits, norm_length), "wer": rate(word_edits, word_length),
             "entity_labeled_clips": entity_labeled, "entity_precision": rate(tp, tp + fp),
             "entity_recall": rate(tp, tp + fn), "entity_f1": rate(2 * tp, 2 * tp + fp + fn)}
+
+
+def score_corrections(dataset, baseline, corrected, *, tokenize=None):
+    before = score_asr(dataset, baseline, tokenize=tokenize)
+    after = score_asr(dataset, corrected, tokenize=tokenize)
+    changed = affected = regressed = unchanged_error = 0
+    for clip in dataset.clips:
+        original, revised = (normalize_for_cer(predictions.get(clip.id, "")) for predictions in (baseline, corrected))
+        if original == revised:
+            continue
+        changed += 1
+        if clip.reference is None:
+            continue
+        affected += 1
+        target = normalize_for_cer(clip.reference)
+        difference = edit_distance(revised, target) - edit_distance(original, target)
+        regressed += int(difference > 0)
+        unchanged_error += int(difference == 0)
+    baseline_cer, corrected_cer = (item["cer_nfkc_no_spaces"] for item in (before, after))
+    return {"before": before, "after": after, "changed_clips": changed, "changed_labeled_clips": affected,
+            "false_correction_rate": rate(regressed, affected), "equal_error_changed_clips": unchanged_error,
+            "net_cer_improvement": baseline_cer - corrected_cer if baseline_cer is not None else None}
 
 
 def score_translation(dataset, predictions, target):

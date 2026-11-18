@@ -5,6 +5,8 @@ import vm from 'node:vm';
 
 const root = new URL('../', import.meta.url);
 const cases = JSON.parse(fs.readFileSync(new URL('tests/fixtures/asr_domain_cases.json', root), 'utf8'));
+const evidenceCases = JSON.parse(fs.readFileSync(new URL('tests/fixtures/asr_domain_evidence.json', root), 'utf8'));
+const selections = JSON.parse(fs.readFileSync(new URL('tests/fixtures/episode_selection.json', root), 'utf8'));
 const sandbox = vm.createContext({ URL });
 vm.runInContext(fs.readFileSync(new URL('extension/asr-domain.js', root), 'utf8'), sandbox);
 const create = (...args) => sandbox.JLSASRDomain.create(...args);
@@ -55,10 +57,47 @@ test('every curated full alias has one canonical output and guarded aliases requ
   for (const [id, pack] of Object.entries(packs)) {
     const corrector = select([id]);
     for (const entry of pack.entries) for (const alias of entry.aliases) {
-      const { text, requires = entry.requires } = typeof alias === 'string' ? { text: alias } : alias;
+      const { text, requires = entry.requires, candidate } = typeof alias === 'string' ? { text: alias } : alias;
       const cue = requires ? pack.cues[requires[0]][0] + '、' : '';
-      assert.equal(corrector.correct(cue + text), cue + entry.term, `${id}: ${text}`);
+      const result = corrector.explain(cue + text);
+      if (candidate) {
+        assert.equal(result.text, cue + text);
+        assert.equal(result.candidates[0].canonical, entry.term);
+        assert.equal(result.candidates[0].level, 3);
+      } else {
+        assert.equal(result.text, cue + entry.term, `${id}: ${text}`);
+      }
     }
+  }
+});
+
+test('shared evidence contract preserves canonical forms and code point offsets', () => {
+  const raw = JSON.parse(fs.readFileSync(new URL('extension/asr-terms/episodes.json', root), 'utf8'));
+  const catalog = sandbox.JLSASRDomain.loadEpisodes(raw);
+  for (const item of evidenceCases) {
+    const episode = 'title' in item ? catalog(item.title) : null;
+    const result = select(episode ? [episode.pack] : item.packs, episode).explain(item.raw);
+    assert.deepEqual(JSON.parse(JSON.stringify(result)), item.expected, item.raw);
+  }
+});
+
+test('an alias cannot elevate its unverified custom entry', () => {
+  const result = create({ version: 1, cues: {}, entries: [{
+    term: '新候補', verified: false, aliases: [{ text: '元表記', verified: true }],
+  }] }).explain('元表記');
+  assert.equal(result.text, '元表記');
+  assert.equal(result.changes.length, 0);
+  assert.equal(result.candidates[0].verified, false);
+});
+
+test('shared episode selection and fallback contract', () => {
+  const raw = JSON.parse(fs.readFileSync(new URL('extension/asr-terms/episodes.json', root), 'utf8'));
+  const catalog = sandbox.JLSASRDomain.loadEpisodes(raw);
+  for (const item of selections) {
+    const selection = catalog(item.title, { packs: item.manual, general: item.general });
+    assert.equal(selection.match, item.match, item.title);
+    assert.deepEqual(Array.from(selection.packs), item.packs);
+    if (item.raw) assert.equal(select(selection.packs, selection).correct(item.raw), item.text);
   }
 });
 

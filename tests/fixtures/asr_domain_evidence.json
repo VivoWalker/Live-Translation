@@ -1,0 +1,53 @@
+[
+  {
+    "packs": ["mashiro"],
+    "raw": "🌸日高真白さんと陽高真白さん",
+    "expected": {
+      "text": "🌸陽高真白さんと陽高真白さん",
+      "changes": [{"alias":"日高真白","canonical":"陽高真白","start":1,"end":5,"source":"pack:mashiro","verified":true,"independent_asr":false,"rule":"curated_alias","decision":"accepted","level":1}],
+      "candidates": []
+    }
+  },
+  {
+    "packs": ["gakumas"],
+    "raw": "曲は『はくせん』です。",
+    "expected": {
+      "text": "曲は『白線』です。",
+      "changes": [{"alias":"はくせん","canonical":"白線","start":3,"end":7,"source":"pack:gakumas","verified":true,"independent_asr":false,"rule":"sentence_cue","decision":"accepted","level":2}],
+      "candidates": []
+    }
+  },
+  {
+    "packs": ["gakumas"],
+    "raw": "曲がった先のはくせんで止まり、歴史を学ます。",
+    "expected": {"text":"曲がった先のはくせんで止まり、歴史を学ます。","changes":[],"candidates":[]}
+  },
+  {
+    "packs": ["bandori", "lovelive"],
+    "raw": "ラブライブの曲はシルエットダンスとパノラマです。",
+    "expected": {"text":"ラブライブの曲はシルエットダンスとパノラマです。","changes":[],"candidates":[]}
+  },
+  {
+    "packs": ["gakumas"],
+    "raw": "学マス！てまりちゃんは別の番組に出た。",
+    "expected": {"text":"学マス！てまりちゃんは別の番組に出た。","changes":[],"candidates":[]}
+  },
+  {
+    "packs": ["mashiro"],
+    "raw": "陽高真白が真っ白ちゃんの紙を見た。",
+    "expected": {
+      "text":"陽高真白が真っ白ちゃんの紙を見た。",
+      "changes": [],
+      "candidates": [{"alias":"真っ白ちゃん","canonical":"真白ちゃん","start":5,"end":11,"source":"pack:mashiro","verified":true,"independent_asr":false,"rule":"candidate_only","decision":"suggested","level":3}]
+    }
+  },
+  {
+    "title": "【学マス】初星学園ＨＲ",
+    "raw": "ふじたことねです。",
+    "expected": {
+      "text": "ふじたことねです。",
+      "changes": [],
+      "candidates": [{"alias":"ふじたことね","canonical":"藤田ことね","start":0,"end":6,"source":"https://idollist.idolmaster-official.jp/search/detail/60003","verified":true,"independent_asr":false,"rule":"episode_candidate","decision":"suggested","level":3}]
+    }
+  }
+]

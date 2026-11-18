@@ -10,8 +10,7 @@ const restored = chrome.storage.session.get('jls').then(({ jls }) => {
 });
 chrome.storage.local?.setAccessLevel?.({ accessLevel: 'TRUSTED_CONTEXTS' }).catch(() => {});
 
-async function setStatus(patch, sessionId) {
-  const ticket = generation;
+async function setStatus(patch, sessionId, ticket = generation) {
   const cur = (await chrome.storage.session.get('jlsStatus')).jlsStatus || {};
   if (ticket !== generation) return;
   if (sessionId && sessionId !== state.sessionId) return;
@@ -28,7 +27,7 @@ async function ensureContentScript(tabId) {
   await chrome.scripting.executeScript({ target: { tabId }, files: ['caption-settings.js', 'caption-overlay.js', 'content.js'] });
 }
 async function start({ tabId, target, serverUrl, streamId, engine = 'browser', apiKey = '', serverToken = '',
-  asrPacks, asrDomain, domainMode, pageTitle, contextTurns, vad, localMode, agent, allowRemote }) {
+  asrPacks, asrDomain, domainMode, domainFallback, pageTitle, contextTurns, vad, localMode, agent, allowRemote }) {
   const packs = JLSASRDomain.normalizePacks(asrPacks ?? asrDomain);
   const endpoint = engine === 'browser' ? DEFAULT_SERVER : JLSServerURL.checked(serverUrl || DEFAULT_SERVER, allowRemote);
   await restored;
@@ -44,6 +43,7 @@ async function start({ tabId, target, serverUrl, streamId, engine = 'browser', a
     if (!current()) return { ok: false, error: '采集已取消' };
     const clear = id => chrome.tabs.sendMessage(id, { type: 'jls:clear' }).catch(() => {});
     await clear(tabId);
+    if (!current()) return { ok: false, error: '采集已取消' };
     if (previousTab && previousTab !== tabId) await clear(previousTab);
     if (!current()) return { ok: false, error: '采集已取消' };
     const saved = await chrome.storage.local.get('jlsCaptionPrefs');
@@ -56,7 +56,8 @@ async function start({ tabId, target, serverUrl, streamId, engine = 'browser', a
     const response = await chrome.runtime.sendMessage({
       type: 'jls:offscreen-start', sessionId, streamId, tabId, target,
       serverUrl: endpoint, engine, apiKey, serverToken, allowRemote: allowRemote === true,
-      asrPacks: packs, domainMode, pageTitle: domainMode === 'auto' ? String(pageTitle || '').slice(0, 240) : undefined,
+      asrPacks: packs, domainMode, domainFallback: ['selected', 'general', 'off'].includes(domainFallback) ? domainFallback : undefined,
+      pageTitle: domainMode === 'auto' ? Array.from(String(pageTitle || '')).slice(0, 240).join('') : undefined,
       contextTurns: [1, 3, 4, 5].includes(contextTurns) ? contextTurns : undefined,
       vad, localMode, agent,
     });
@@ -66,26 +67,30 @@ async function start({ tabId, target, serverUrl, streamId, engine = 'browser', a
     return { ok: true };
   } catch (error) {
     if (!current()) return { ok: false, error: '采集已取消' };
-    await stop(true);
-    await setStatus({ phase: 'error', message: error.message || String(error) });
+    const stopped = await stop(true, sessionId);
+    if (stopped === generation) await setStatus({ phase: 'error', message: error.message || String(error) }, null, stopped);
     return { ok: false, error: error.message || String(error) };
   }
 }
 async function stop(silent, expectedSession) {
   await restored;
   if (expectedSession && state.sessionId !== expectedSession) return;
-  ++generation;
+  const ticket = ++generation;
   const sessionId = state.sessionId;
   Object.assign(state, { running: false, tabId: null, sessionId: null });
   chrome.action.setBadgeText({ text: '' });
   await chrome.storage.session.set({ jls: { ...state } });
-  await setStatus({ phase: 'idle', message: '已停止' });
-  try { await chrome.runtime.sendMessage({ type: 'jls:offscreen-stop', sessionId }); } catch {}
-  if (!silent) {
-    for (const tab of await chrome.tabs.query({})) {
-      if (tab.id) chrome.tabs.sendMessage(tab.id, { type: 'jls:clear' }).catch(() => {});
+  await setStatus({ phase: 'idle', message: '已停止' }, null, ticket);
+  if (sessionId) {
+    try { await chrome.runtime.sendMessage({ type: 'jls:offscreen-stop', sessionId }); } catch {}
+  }
+  if (!silent && ticket === generation) {
+    const tabs = await chrome.tabs.query({});
+    if (ticket === generation) {
+      for (const tab of tabs) if (tab.id) chrome.tabs.sendMessage(tab.id, { type: 'jls:clear' }).catch(() => {});
     }
   }
+  return ticket;
 }
 function trustedPage(sender, path) {
   return sender.id === chrome.runtime.id && sender.url === chrome.runtime.getURL(path);
@@ -140,13 +145,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       await setStatus({ phase: msg.phase, message: msg.message }, msg.sessionId);
       if (msg.sessionId !== state.sessionId) return;
       if (msg.phase === 'idle' || msg.phase === 'error') {
-        await stop(msg.phase === 'error', msg.sessionId);
-        if (msg.phase === 'error' && !state.running) {
-          await setStatus({ phase: 'error', message: msg.message });
-          chrome.tabs.sendMessage(tabId, { type: 'jls:toast', text: msg.message, bad: true }).catch(() => {});
+        const stopped = await stop(msg.phase === 'error', msg.sessionId);
+        if (msg.phase === 'error' && stopped === generation) {
+          await setStatus({ phase: 'error', message: msg.message }, null, stopped);
+          if (stopped === generation) chrome.tabs.sendMessage(tabId, { type: 'jls:toast', text: msg.message, bad: true }).catch(() => {});
         }
       } else {
-        if (msg.phase === 'error') chrome.tabs.sendMessage(tabId, { type: 'jls:toast', text: msg.message, bad: true }).catch(() => {});
         chrome.action.setBadgeText({ text: ['capturing', 'connected', 'degraded'].includes(msg.phase) ? '●' : '' });
         chrome.action.setBadgeBackgroundColor({ color: msg.phase === 'degraded' ? '#edb64d' : '#35d07f' });
       }

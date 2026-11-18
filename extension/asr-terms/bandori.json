@@ -98,7 +98,7 @@
     {"term": "迷星叫", "aliases": ["まよいうた", "マヨイウタ"], "requires": ["song"]},
     {"term": "碧天伴走", "aliases": ["へきてんばんそう", "ヘキテンバンソウ"], "requires": ["song"]},
     {"term": "詩超絆", "aliases": ["うたことば", "ウタコトバ"], "requires": ["song"]},
-    {"term": "影色舞", "aliases": ["しるえっとだんす", "シルエットダンス", "かげいろまい", "カゲイロマイ"], "requires": ["song"]},
+    {"term": "影色舞", "aliases": [{"text": "しるえっとだんす", "requires": ["mygo"]}, {"text": "シルエットダンス", "requires": ["mygo"]}, "かげいろまい", "カゲイロマイ"], "requires": ["song"]},
     {"term": "ポピパ", "aliases": ["ぽぴぱ", "ポッピパ", "ポピッパ", "Popipa"]},
     {"term": "パスパレ", "aliases": ["ぱすぱれ", "パスパレット", "パスパレッ"]},
     {"term": "ハロハピ", "aliases": ["はろはぴ", "ハローハピ", "ハロハピー"]},

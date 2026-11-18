@@ -1,6 +1,6 @@
 /**
- * Extension smoke test in a real browser (Edge accepts --load-extension; Google
- * Chrome 137+ ignores it). Verifies what can be verified without a human clicking
+ * Extension smoke test in a browser that supports --load-extension.
+ * Verifies what can be verified without a human clicking
  * the toolbar button:
  *
  *   - the extension loads and its MV3 service worker starts
@@ -39,7 +39,6 @@ const args = [
   '--no-sandbox',
   '--disable-breakpad',
   '--disable-crash-reporter',
-  '--disable-features=DisableLoadExtensionCommandLineSwitch',
   `--load-extension=${EXT}`,
   `--disable-extensions-except=${EXT}`,
   '--autoplay-policy=no-user-gesture-required',
@@ -66,6 +65,7 @@ function connect(url) {
       const m = JSON.parse(ev.data);
       if (m.id && pending.has(m.id)) {
         const p = pending.get(m.id);
+        clearTimeout(p.timer);
         pending.delete(m.id);
         m.error ? p.reject(new Error(JSON.stringify(m.error).slice(0, 400))) : p.resolve(m.result);
       } else if (m.method === 'Runtime.consoleAPICalled') {
@@ -81,14 +81,12 @@ function connect(url) {
 function call(ws, method, params = {}, sessionId) {
   const id = ++msgId;
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
-    ws.send(JSON.stringify(sessionId ? { id, method, params, sessionId } : { id, method, params }));
-    setTimeout(() => {
-      if (pending.has(id)) {
-        pending.delete(id);
-        reject(new Error('timeout ' + method));
-      }
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error('timeout ' + method));
     }, 20000);
+    pending.set(id, { resolve, reject, timer });
+    ws.send(JSON.stringify(sessionId ? { id, method, params, sessionId } : { id, method, params }));
   });
 }
 
@@ -193,7 +191,7 @@ try {
   check('content script reachable (ping)', String(pong).includes('"ok":true'), String(pong));
 
   // 4. background -> content relay paints the overlay
-  const relay = await evaluate(
+  await evaluate(
     ws,
     swSession,
     `(async () => {
@@ -211,7 +209,7 @@ try {
   const overlayRaw = await evaluate(
     ws,
     pageSession,
-    `(() => { const h = document.getElementById('ja-live-subs-host'); if (!h || !h.shadowRoot) return 'none'; const r = h.shadowRoot; const cur = r.querySelector('.cur'); return JSON.stringify({ja: cur?.querySelector('.ja').textContent || '', zh: cur?.querySelector('.zh').textContent || '', visible: !r.querySelector('.wrap').classList.contains('hidden')}); })()`,
+    `(() => { const r = document.getElementById('ja-live-subs-host')?.shadowRoot; if (!r) return 'none'; const cur = r.querySelector('.rows .row[data-id="7"]'); return JSON.stringify({ja: cur?.querySelector('.ja')?.textContent || '', zh: cur?.querySelector('.zh')?.textContent || '', visible: !r.querySelector('.wrap').classList.contains('hidden')}); })()`,
     false
   );
   const overlay = overlayRaw === 'none' ? { ja: '', zh: '', visible: false } : JSON.parse(overlayRaw);
@@ -221,7 +219,7 @@ try {
   const startErr = await evaluate(
     ws,
     swSession,
-    `start(${tab.id}, 'zh', 'ws://127.0.0.1:8765/ws').then(r => JSON.stringify(r)).catch(e => 'THROW ' + e.message)`
+    `start({tabId:${tab.id},target:'zh'}).then(r => JSON.stringify(r)).catch(e => 'THROW ' + e.message)`
   );
   check('start() reports capture permission error clearly', /ok":false|THROW/.test(String(startErr)), String(startErr).slice(0, 160));
 
@@ -231,7 +229,6 @@ try {
     console.log('openPopup:', opened);
     await sleep(1200);
     const { targetInfos: after } = await call(ws, 'Target.getTargets');
-    const popup = after.find((t) => t.url.includes('popup.html') && !t.url.startsWith('chrome-extension://' + extId + '/popup.html?tab'));
     const popupTarget = after.find((t) => t.type !== 'service_worker' && t.url.includes('popup.html'));
     let streamId = null;
     if (popupTarget) {
@@ -242,7 +239,7 @@ try {
         popSession,
         `chrome.tabCapture.getMediaStreamId({ targetTabId: ${tab.id} }).then(id => id).catch(e => 'ERR ' + e.message)`
       ).catch((e) => 'ERR ' + e.message);
-      console.log('streamId from popup:', String(streamId).slice(0, 200));
+      console.log('capture grant received:', Boolean(streamId && !String(streamId).startsWith('ERR')));
     } else {
       console.log('popup target not found; targets:', after.map((t) => t.type + ':' + t.url.slice(0, 60)).join(' | '));
     }
@@ -250,14 +247,14 @@ try {
       const started = await evaluate(
         ws,
         swSession,
-        `start(${tab.id}, 'zh', 'ws://127.0.0.1:8765/ws', ${JSON.stringify(streamId)}).then(r => JSON.stringify(r)).catch(e => 'THROW ' + e.message)`
+        `start({tabId:${tab.id},target:'zh',streamId:${JSON.stringify(streamId)}}).then(r => JSON.stringify(r)).catch(e => 'THROW ' + e.message)`
       );
       console.log('start():', started);
       const t0 = Date.now();
       let got = 0;
       while (Date.now() - t0 < 15000) {
         await sleep(700);
-        const raw = await evaluate(ws, pageSession, `(() => { const h = document.getElementById('ja-live-subs-host'); if (!h || !h.shadowRoot) return 'none'; const r = h.shadowRoot; return JSON.stringify({ja: r.querySelector('.ja').textContent, zh: r.querySelector('.zh').textContent}); })()`, false);
+        const raw = await evaluate(ws, pageSession, `(() => { const r = document.getElementById('ja-live-subs-host')?.shadowRoot; const row = r?.querySelector('.rows .row'); return JSON.stringify({ja: row?.querySelector('.ja')?.textContent, zh: row?.querySelector('.zh')?.textContent}); })()`, false);
         if (raw && raw !== 'none') {
           const o = JSON.parse(raw);
           if (o.ja) {
@@ -267,6 +264,8 @@ try {
         }
       }
       check('live tab capture produces captions', got >= 2, got + ' updates');
+    } else {
+      check('live tab capture produces captions', false, 'toolbar tabCapture permission unavailable');
     }
   }
   const pass = results.every((r) => r.ok);
@@ -281,6 +280,7 @@ try {
   console.error('RESULT: FAIL', e.message);
   process.exitCode = 1;
 } finally {
+  for (const item of pending.values()) clearTimeout(item.timer);
   try {
     child.kill();
   } catch {}

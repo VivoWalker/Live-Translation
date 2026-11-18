@@ -4,8 +4,14 @@ Set-Location $PSScriptRoot
 
 if (-not (Test-Path '.venv\Scripts\python.exe')) {
     Write-Host '[jls] 创建虚拟环境…'
-    py -3.10 -m venv .venv
+    py -3.12 -m venv .venv
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+
+.\.venv\Scripts\python.exe -c "import sys; sys.exit(sys.version_info < (3, 11))"
+if ($LASTEXITCODE -ne 0) {
+    Write-Error '需要 Python 3.11+。请保留或重命名旧 .venv，再用 Python 3.12 运行此脚本。'
+    exit 1
 }
 
 $pipVersion = .\.venv\Scripts\python.exe -c "import importlib.metadata; print(importlib.metadata.version('pip'))"
@@ -17,7 +23,7 @@ if ([version]$pipVersion -lt [version]'26.2') {
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 if (-not $env:DEEPSEEK_API_KEY -and -not (Test-Path 'config.local.json')) {
-    Write-Warning '未找到 DeepSeek API Key：复制 config.example.json 为 config.local.json 并填入 key，或设置 $env:DEEPSEEK_API_KEY。当前会退回公共翻译端点。'
+    Write-Warning '未找到 DeepSeek API Key，当前仅显示日语。需要翻译时可设置 DEEPSEEK_API_KEY 或本机配置。'
 }
 
 $env:PYTHONIOENCODING = 'utf-8'

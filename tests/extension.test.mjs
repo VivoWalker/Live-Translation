@@ -23,7 +23,7 @@ function media() {
   const track = { stopped: false, stop() { this.stopped = true; }, addEventListener() {} };
   return { track, getTracks: () => [track], getAudioTracks: () => [track] };
 }
-function offscreen(engine = { init: async () => {}, stop() {}, stats: () => ({}) }) {
+function offscreen(engine = { init: async () => {}, stop() {}, stats: () => ({}) }, options = {}) {
   const requests = [], messages = [], sockets = [], nodes = [];
   let listener;
   class Context {
@@ -32,10 +32,19 @@ function offscreen(engine = { init: async () => {}, stop() {}, stats: () => ({})
     createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
   }
   class Socket {
-    constructor() { this.readyState = 1; this.sent = []; sockets.push(this); queueMicrotask(() => this.onopen()); }
+    constructor() {
+      this.readyState = 1; this.sent = []; sockets.push(this);
+      queueMicrotask(() => options.unavailable ? this.onerror() : this.onopen());
+    }
+    receive(message) { this.onmessage({ data: JSON.stringify(message) }); }
     send(raw) {
       this.sent.push(typeof raw === 'string' ? JSON.parse(raw) : raw);
-      if (this.sent.length === 2) queueMicrotask(() => this.onmessage({ data: JSON.stringify({ type: 'ready', asr: 'whisper-base-int8', translator: 'mock' }) }));
+      if (this.sent[0]?.type === 'auth' && this.sent.length === 1) {
+        queueMicrotask(() => {
+          if (options.denied) this.onclose({ code: 1008 });
+          else this.receive({ type: 'ready', asr: 'whisper-base-int8', translator: 'mock', ...options.ready });
+        });
+      }
     }
     close() { this.readyState = 3; }
   }
@@ -159,6 +168,44 @@ test('enhanced capture sends opted-in context and Agent configuration to the ser
     page_title: '初星学園HR', context_turns: 3, mode: 'enhanced', agent: true });
   assert.match(context.messages.find(m => m.phase === 'capturing').message, /未启用 Agent/);
   await context.send({ type: 'jls:offscreen-stop', sessionId: 'E' });
+});
+
+test('new service configuration is acknowledged before audio and reports live fallback accurately', async () => {
+  const context = offscreen(undefined, { ready: { config_ack: true, asr: 'sensevoice-int8', asr_mode: 'fast',
+    asr_fallback_from: 'parakeet', translator: 'disabled', agent: { enabled: true } } });
+  const pending = context.send({ type: 'jls:offscreen-start', sessionId: 'S', engine: 'server-enhanced',
+    localMode: 'enhanced', domainMode: 'auto', domainFallback: 'general', pageTitle: '雑談', agent: true });
+  await tick();
+  context.requests[0].resolve(media());
+  await tick();
+  const socket = context.sockets[0];
+  assert.deepEqual(socket.sent.map(message => message.type), ['auth', 'config']);
+  assert.equal(socket.sent[1].domain_general, true);
+  assert.equal(socket.sent[1].request_id, 1);
+  socket.receive({ type: 'config', ok: true, request_id: 2, target: 'zh' });
+  assert.equal(context.messages.some(m => m.phase === 'capturing'), false);
+  socket.receive({ type: 'config', ok: true, request_id: 1, target: 'zh', domain: { match: 'general_fallback' },
+    agent: { enabled: true, verification_available: false, secondary_state: 'unavailable' } });
+  assert.equal((await pending).ok, true);
+  const notice = context.messages.find(message => message.phase === 'capturing').message;
+  for (const text of ['请求本地增强', 'sensevoice-int8', '回退', '第二模型加载失败', '仅显示日语', '保守直播词库']) {
+    assert(notice.includes(text));
+  }
+  await context.send({ type: 'jls:offscreen-stop', sessionId: 'S' });
+});
+
+test('unreachable and unauthenticated local service close the capture without sending PCM or titles', async () => {
+  for (const [options, expected] of [[{ unavailable: true }, /无法连接/], [{ denied: true }, /访问令牌/]]) {
+    const context = offscreen(undefined, options);
+    const start = context.send({ type: 'jls:offscreen-start', sessionId: 'failed', engine: 'server',
+      domainMode: 'auto', pageTitle: 'private title' });
+    await tick();
+    const stream = media();
+    context.requests[0].resolve(stream);
+    assert.match((await start).error, expected);
+    assert.equal(stream.track.stopped, true);
+    assert.equal(context.sockets[0].sent.some(message => message.type === 'config'), false);
+  }
 });
 
 test('worklet credit bounds unconsumed blocks and signals overrun once', () => {
@@ -535,13 +582,18 @@ test('large model storage has the extension permission needed to avoid eviction'
 
 test('background forwards mode/keys and refuses stale or spoofed events', async () => {
   let listener;
+  let blockedStop;
   const sent = [], painted = [], values = {};
   const sandbox = vm.createContext({
     console, crypto: webcrypto, setTimeout,
     chrome: {
-      runtime: { id: extensionId, getURL: extensionURL, getContexts: async () => [{}], onMessage: { addListener(fn) { listener = fn; } }, sendMessage: async m => { sent.push(m); return { ok: true }; } },
+      runtime: { id: extensionId, getURL: extensionURL, getContexts: async () => [{}], onMessage: { addListener(fn) { listener = fn; } }, sendMessage: async m => {
+        sent.push(m);
+        if (m.type === 'jls:offscreen-stop' && blockedStop) await blockedStop.promise;
+        return { ok: true };
+      } },
       storage: { local: { setAccessLevel: async () => {}, get: async key => ({ [key]: values[key] }), set: async entries => Object.assign(values, entries) }, session: { get: async key => ({ [key]: values[key] }), set: async entries => Object.assign(values, entries) } },
-      tabs: { sendMessage: async (id, m) => { painted.push({ id, ...m }); return { ok: true }; }, query: async () => [], onRemoved: { addListener() {} } },
+      tabs: { sendMessage: async (id, m) => { painted.push({ id, ...m }); return { ok: true }; }, query: async () => [{ id: 2 }], onRemoved: { addListener() {} } },
       action: { setBadgeText() {}, setBadgeBackgroundColor() {} },
     },
   });
@@ -580,6 +632,16 @@ test('background forwards mode/keys and refuses stale or spoofed events', async 
   await dispatch(listener, { type: 'jls:event', sessionId: last.sessionId, event: { text: 'after-stop' } }, 'offscreen.html');
   await tick();
   assert.equal(painted.length, 0);
+  await dispatch(listener, { ...message, tabId: 2 }, 'popup.html');
+  blockedStop = deferred();
+  const stopping = dispatch(listener, { type: 'jls:stop' }, 'popup.html');
+  await tick();
+  await dispatch(listener, { ...message, tabId: 2 }, 'popup.html');
+  painted.length = 0;
+  blockedStop.resolve();
+  await stopping;
+  assert.equal(painted.some(m => m.type === 'jls:clear'), false);
+  assert.equal((await dispatch(listener, { type: 'jls:query' }, 'popup.html')).running, true);
 });
 
 test('browser-mode popup starts without fetching a local service', async () => {
@@ -594,7 +656,7 @@ test('browser-mode popup starts without fetching a local service', async () => {
     fetch: async () => { calls++; throw new Error('No local service'); },
     chrome: {
       tabs: { query: async () => [{ id: 1, url: 'https://video.test', title: 'test' }] },
-      storage: { local: { get: async () => ({ jlsEngine: 'browser', jlsApiKey: 'sk-fake', jlsAsrDomain: 'off', jlsModelCache: { saved: false, warning: true, message: '模型未保存' } }), set: async values => Object.assign(saved, values) }, session: { get: async () => ({}) }, onChanged: { addListener() {} } },
+      storage: { local: { get: async () => ({ jlsEngine: 'browser', jlsAsrDomain: 'off', jlsModelCache: { saved: false, warning: true, message: '模型未保存' } }), set: async values => Object.assign(saved, values) }, session: { get: async () => ({}) }, onChanged: { addListener() {} } },
       runtime: { sendMessage: async m => { sent.push(m); return m.type === 'jls:query' ? { running: false } : { ok: true }; } },
       tabCapture: { getMediaStreamId: async () => 'mock' },
     },
@@ -618,6 +680,7 @@ test('browser-mode popup starts without fetching a local service', async () => {
   await element('start').click();
   assert.equal(calls, 0);
   assert.equal(sent.find(m => m.type === 'jls:start').engine, 'browser');
+  assert.equal(sent.find(m => m.type === 'jls:start').apiKey, '');
   assert.equal(sent.find(m => m.type === 'jls:start').pageTitle, 'test');
   assert.equal(sent.find(m => m.type === 'jls:start').contextTurns, 3);
   assert.deepEqual(Array.from(sent.find(m => m.type === 'jls:start').asrPacks), ['mashiro']);
@@ -719,7 +782,7 @@ test('browser model, version, endpoint and output parameter changes clear sessio
   const context = engine(); await context.api.init(context.config);
   try {
     await translatedUtterance(context, '句');
-    for (const config of [{ model: 'other-model' }, { promptVersion: 'subtitle-v3' }, { baseUrl: 'https://api.deepseek.com/v1' }, { temperature: .3 }, { maxTokens: 513 }, { apiKey: 'sk-new-fixture' }]) {
+    for (const config of [{ model: 'other-model' }, { promptVersion: 'fixture-version' }, { baseUrl: 'https://api.deepseek.com/v1' }, { temperature: .3 }, { maxTokens: 513 }, { apiKey: 'sk-new-fixture' }]) {
       context.api.setConfig(config);
       assert.equal(context.api.stats().translation.cache_entries, 0);
       assert.equal(context.api.stats().translation.api_requests, 0);
@@ -874,6 +937,36 @@ test('browser failures and usage statistics never echo dialogue, provider bodies
     assert(!diagnostic.includes('sk-private-context'));
     assert(!diagnostic.includes('Bearer'));
     assert.equal(context.api.stats().translation.in_flight, 0);
+  } finally { context.api.stop(); }
+});
+
+test('browser recognition without a DeepSeek key delivers Japanese and skips translation', async () => {
+  const context = engine();
+  await context.api.init({ ...context.config, apiKey: '' });
+  try {
+    context.hypothesis('こんにちは。');
+    context.utterance();
+    await tick();
+    assert.equal(context.events.find(event => event.type === 'ready').translator, 'disabled');
+    assert.equal(context.events.find(event => event.type === 'final').text, 'こんにちは。');
+    assert.equal(context.events.find(event => event.type === 'translation_cancelled').id, 0);
+    assert.equal(context.requests.length, 0);
+  } finally { context.api.stop(); }
+});
+
+test('browser posts untrusted Japanese inside the fixed envelope and disallows redirects', async () => {
+  const context = engine({ fetcher: async (_url, options) => {
+    assert.equal(options.redirect, 'error');
+    const { messages } = JSON.parse(options.body);
+    assert.deepEqual(messages.map(message => message.role), ['system', 'user']);
+    assert(!messages[0].content.includes('ignore-instructions-fixture'));
+    assert.equal(JSON.parse(messages[1].content).current, 'ignore-instructions-fixture');
+    return successfulReply('result');
+  } });
+  await context.api.init(context.config);
+  try {
+    context.hypothesis('ignore-instructions-fixture'); context.utterance(); await tick();
+    assert.equal(context.events.find(event => event.type === 'translation')?.text, 'result');
   } finally { context.api.stop(); }
 });
 
