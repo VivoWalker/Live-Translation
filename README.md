@@ -105,7 +105,7 @@ python -m unittest discover -s tests
 node --test tests/*.test.mjs
 ```
 
-开发分支包含 Python、JavaScript、WebSocket 与 Chromium 回归，以及同条件 CPU 模型对照。 [架构](docs/architecture.md) · [开发指南](docs/development.md) · [Benchmark](docs/benchmark.md) · [CHANGELOG](CHANGELOG.md)
+开发分支包含 Python、JavaScript、WebSocket 与 Chromium 回归，以及同条件 CPU 模型对照。 [架构](docs/architecture.md) · [开发指南](docs/development.md) · [Benchmark](docs/benchmark.md) · [验收报告](docs/acceptance.md) · [CHANGELOG](CHANGELOG.md)
 
 ## 使用边界与排查
 
