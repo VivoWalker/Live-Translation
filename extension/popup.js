@@ -19,6 +19,7 @@ const contextTurns = $('context-turns');
 const vadSilence = $('vad-silence');
 const vadSegment = $('vad-segment');
 const agentMode = $('agent-mode');
+const allowRemote = $('allow-remote');
 const fallback = $('browser-fallback');
 const sessionFields = [engine, target, apiKey, server, serverToken, domainMode, contextTurns, vadSilence, vadSegment, agentMode];
 const settingKeys = ['jlsEngine', 'jlsTarget', 'jlsApiKey', 'jlsServer', 'jlsServerToken',
@@ -66,6 +67,7 @@ function setPhase(next, message) {
   stopButton.disabled = phase === 'stopping';
   fallback.hidden = phase !== 'error' || engine.value === 'browser';
   for (const field of sessionFields) field.disabled = active;
+  allowRemote.disabled = active;
   domainField.disabled = active;
   showMessage(message, phase === 'error');
 }
@@ -80,7 +82,7 @@ function renderFields() {
   const browser = engine.value === 'browser';
   for (const id of ['apikey-field', 'vad-silence-field', 'vad-segment-field']) $(id).hidden = !browser;
   $('asr-domain-field').hidden = !browser || domainMode.value !== 'manual';
-  for (const id of ['server-field', 'token-field', 'agent-field', 'service-note']) $(id).hidden = browser;
+  for (const id of ['server-field', 'token-field', 'agent-field', 'service-note', 'remote-field']) $(id).hidden = browser;
   const cache = $('model-cache-status');
   cache.hidden = !browser || !(cacheInfo?.saved || cacheInfo?.warning);
   cache.textContent = cacheInfo?.warning ? cacheInfo.message : cacheInfo?.saved ? '识别模型已缓存' : '';
@@ -112,7 +114,7 @@ function focusRequiredField(field, message) {
 async function init() {
   const [[tab], store, capture] = await Promise.all([
     chrome.tabs.query({ active: true, currentWindow: true }),
-    chrome.storage.local.get([...settingKeys, 'jlsModelCache', 'jlsAsrDomain', 'jlsAsrPacks', 'jlsCaptionPrefs']),
+    chrome.storage.local.get([...settingKeys, 'jlsAllowRemote', 'jlsModelCache', 'jlsAsrDomain', 'jlsAsrPacks', 'jlsCaptionPrefs']),
     chrome.runtime.sendMessage({ type: 'jls:query' }).catch(() => null),
   ]);
   activeTab = tab;
@@ -125,6 +127,7 @@ async function init() {
   vadSilence.value = choice(store.jlsVadSilence, ['0.4', '0.6', '0.8'], '0.4');
   vadSegment.value = choice(store.jlsVadSegment, ['8', '12', '16'], '12');
   agentMode.value = choice(store.jlsAgentMode, ['on', 'off'], 'default');
+  allowRemote.checked = store.jlsAllowRemote === true;
   server.value = store.jlsServer || DEFAULT_SERVER;
   apiKey.value = store.jlsApiKey || '';
   serverToken.value = store.jlsServerToken || '';
@@ -152,6 +155,9 @@ async function init() {
   domainField.addEventListener('change', () => {
     chrome.storage.local.set({ jlsAsrPacks: selectedPacks() }).catch(() => {});
   });
+  allowRemote.addEventListener('change', () => {
+    chrome.storage.local.set({ jlsAllowRemote: allowRemote.checked }).catch(() => {});
+  });
   sessionFields.forEach((field, index) => field.addEventListener('change', () => {
     chrome.storage.local.set({ [settingKeys[index]]: field.value.trim() }).catch(() => {});
     if (field === engine || field === domainMode) renderFields();
@@ -175,6 +181,7 @@ startButton.addEventListener('click', async () => {
     vad: browser ? { minSilence: Number(vadSilence.value), maxSegment: Number(vadSegment.value) } : undefined,
     localMode: browser ? undefined : engine.value === 'server-enhanced' ? 'enhanced' : 'fast',
     agent: browser ? undefined : agentMode.value === 'on' || agentMode.value === 'default' && engine.value === 'server-enhanced',
+    allowRemote: !browser && allowRemote.checked,
   };
   if (browser && !config.apiKey) {
     focusRequiredField(apiKey, '请填写 DeepSeek API Key');
@@ -186,9 +193,9 @@ startButton.addEventListener('click', async () => {
   }
   if (!browser) {
     try {
-      if (!['ws:', 'wss:'].includes(new URL(config.serverUrl).protocol)) throw new Error();
-    } catch {
-      focusRequiredField(server, '请输入以 ws:// 或 wss:// 开头的服务地址');
+      config.serverUrl = JLSServerURL.checked(config.serverUrl, config.allowRemote);
+    } catch (error) {
+      focusRequiredField(server, error.message);
       return;
     }
   }
@@ -200,7 +207,8 @@ startButton.addEventListener('click', async () => {
     if (ticket !== operation) return;
     // Autofilled credentials and values entered immediately before the click also persist.
     chrome.storage.local.set({ jlsEngine: config.engine, jlsTarget: config.target, jlsAsrPacks: config.asrPacks,
-      jlsApiKey: config.apiKey, jlsServer: config.serverUrl, jlsServerToken: config.serverToken }).catch(() => {});
+      jlsApiKey: config.apiKey, jlsServer: config.serverUrl, jlsServerToken: config.serverToken,
+      jlsAllowRemote: allowRemote.checked }).catch(() => {});
     const response = await chrome.runtime.sendMessage({ type: 'jls:start', streamId, ...config });
     if (ticket !== operation) return;
     if (!response?.ok) throw new Error(response?.error || '启动失败');

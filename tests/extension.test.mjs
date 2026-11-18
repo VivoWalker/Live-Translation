@@ -10,6 +10,7 @@ const deferred = () => { let resolve; const promise = new Promise(r => { resolve
 const extensionId = 'a'.repeat(32);
 const extensionURL = path => `chrome-extension://${extensionId}/${path}`;
 function loadBackground(sandbox) {
+  sandbox.URL = URL;
   sandbox.importScripts = (...files) => { for (const file of files) vm.runInContext(read(file), sandbox); };
   vm.runInContext(read('background.js'), sandbox);
 }
@@ -39,7 +40,7 @@ function offscreen(engine = { init: async () => {}, stop() {}, stats: () => ({})
     close() { this.readyState = 3; }
   }
   const sandbox = vm.createContext({
-    console, DOMException, setTimeout, clearTimeout, setInterval, clearInterval,
+    console, DOMException, URL, setTimeout, clearTimeout, setInterval, clearInterval,
     AudioContext: Context, AudioWorkletNode: class {
       constructor() { this.port = { postMessage() {} }; nodes.push(this); }
       disconnect() {}
@@ -48,6 +49,7 @@ function offscreen(engine = { init: async () => {}, stop() {}, stats: () => ({})
     navigator: { mediaDevices: { getUserMedia() { const request = deferred(); requests.push(request); return request.promise; } } },
     chrome: { runtime: { id: extensionId, getURL: extensionURL, sendMessage: async m => { messages.push(m); }, onMessage: { addListener(fn) { listener = fn; } } } },
   });
+  vm.runInContext(read('service-url.js'), sandbox);
   vm.runInContext(read('offscreen.js'), sandbox);
   return { requests, messages, sockets, nodes, send: message => dispatch(listener, message) };
 }
@@ -107,6 +109,24 @@ test('server mode authenticates and never starts the browser engine', async () =
   assert.equal(browserStarts, 0);
   assert.equal(context.messages.some(m => m.phase === 'connected' && m.message.includes('whisper-base-int8')), true);
   await context.send({ type: 'jls:offscreen-stop', sessionId: 'S' });
+});
+
+test('remote capture requires explicit consent and secure WebSocket before opening media', async () => {
+  const context = offscreen();
+  for (const [url, allowRemote] of [['wss://remote.test/ws', false], ['ws://remote.test/ws', true],
+    ['wss://user:pass@remote.test/ws', true], ['wss://remote.test/ws?token=secret', true]]) {
+    const result = await context.send({ type: 'jls:offscreen-start', sessionId: 'R', engine: 'server', serverUrl: url, allowRemote });
+    assert.equal(result.ok, false);
+    assert.equal(context.requests.length, 0);
+    assert.equal(context.sockets.length, 0);
+  }
+  const start = context.send({ type: 'jls:offscreen-start', sessionId: 'R', engine: 'server',
+    serverUrl: 'wss://remote.test/ws', allowRemote: true });
+  await tick();
+  context.requests[0].resolve(media());
+  assert.equal((await start).ok, true);
+  assert.equal(context.sockets.length, 1);
+  await context.send({ type: 'jls:offscreen-stop', sessionId: 'R' });
 });
 
 test('server capture reports buffered audio and stops at the hard byte limit', async () => {
@@ -184,7 +204,7 @@ function engine({ runtimeReady = true, runtimeFailure = false, setupFailure = fa
   const sandbox = vm.createContext({
     console, crypto: cryptoImpl, performance,
     Date: clock ? class extends Date { static now() { return clock.now; } } : Date,
-    Float32Array, Uint8Array, Blob, URL, Response, TextEncoder,
+    Float32Array, Uint8Array, Blob, URL, Response, TextEncoder, TextDecoder,
     DOMException, AbortController,
     setTimeout: (fn, delay) => setTimeout(fn, delay === 12000 && requestTimeoutMs !== undefined ? requestTimeoutMs : delay), clearTimeout,
     navigator: { storage: { persist: async () => true } },
@@ -854,6 +874,21 @@ test('browser failures and usage statistics never echo dialogue, provider bodies
     assert(!diagnostic.includes('sk-private-context'));
     assert(!diagnostic.includes('Bearer'));
     assert.equal(context.api.stats().translation.in_flight, 0);
+  } finally { context.api.stop(); }
+});
+
+test('browser bounds streaming provider responses and then accepts a later valid reply', async () => {
+  let calls = 0;
+  const context = engine({ fetcher: async () => ++calls === 1
+    ? new Response('x'.repeat(70000))
+    : Response.json(await successfulReply().json()) });
+  await context.api.init(context.config);
+  try {
+    context.utterance(); await tick();
+    assert.equal(context.api.stats().translation.cache_entries, 0);
+    assert.equal(context.events.find(e => e.type === 'error').id, 0);
+    context.utterance(); await tick();
+    assert.equal(context.events.find(e => e.type === 'translation').id, 1);
   } finally { context.api.stop(); }
 });
 

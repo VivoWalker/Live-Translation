@@ -73,6 +73,7 @@
     en: 'Use history, episode, franchise and glossary only to understand current. Apply glossary to names in the current line. Keep conversational repairs, joking tone and natural omissions. Avoid invented details. Translate current only.',
   };
   const TURN_LIMIT = 512;
+  const MAX_PROVIDER_BYTES = 64 * 1024, MAX_TRANSLATION_CHARS = 8192;
   const CONTEXT_WINDOWS = [1, 3, 4, 5];
   const CACHE_LIMIT = 500, CACHE_BYTES = 1024 * 1024, ENTRY_BYTES = 32768, MAX_INFLIGHT = 32;
   const MAX_DELIVERIES = 32, TRANSLATION_CONCURRENCY = 3, MAX_QUEUE_MS = 16000;
@@ -263,14 +264,33 @@
       }
       if (!response.ok) throw Object.assign(new Error('HTTP ' + response.status),
         { retryable: response.status === 429 || response.status >= 500 });
-      const data = await abortable(response.json(), signal);
+      const data = await providerJson(response, signal);
       usage = data?.usage;
       const choice = Array.isArray(data?.choices) ? data.choices[0] : null, content = choice?.message?.content;
       if (choice?.finish_reason !== 'stop' || typeof content !== 'string' || !content.trim()) throw new Error('翻译结果为空或不完整');
       const text = content.trim().replace(/^(译文|翻译|中文)[:：]\s*/, '').trim().replace(/^["“”]+|["“”]+$/g, '').trim().replace(/\s*\n+\s*/g, ' ');
-      if (!text) throw new Error('翻译结果为空');
+      if (!text || text.length > MAX_TRANSLATION_CHARS) throw new Error('翻译结果为空或过长');
       return text;
     } finally { finishRequest(state, performance.now() - started, usage); }
+  }
+  async function providerJson(response, signal) {
+    const reader = response.body?.getReader?.();
+    if (!reader) return abortable(response.json(), signal);
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+    let size = 0, text = '', complete = false;
+    try {
+      while (true) {
+        const { done, value } = await abortable(reader.read(), signal);
+        if (done) { complete = true; break; }
+        size += value.byteLength;
+        if (size > MAX_PROVIDER_BYTES) throw new Error('翻译响应过长');
+        text += decoder.decode(value, { stream: true });
+      }
+      return JSON.parse(text + decoder.decode());
+    } finally {
+      if (!complete) reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
   }
   async function requestTranslation(snapshot, state, epoch) {
     if (encoder.encode(snapshot.key).length > 65536) throw new Error('翻译文本过长');

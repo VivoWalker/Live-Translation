@@ -36,7 +36,7 @@ async def main() -> int:
     args = ap.parse_args()
     token = os.environ.get('JLSUBS_ACCESS_TOKEN', '')
     if not token:
-        ap.error('Set JLSUBS_ACCESS_TOKEN to the access token printed by the server')
+        ap.error('Set JLSUBS_ACCESS_TOKEN to the local service access token')
     if not 0 < args.speed <= 2 or not 40 <= args.chunk_ms <= 1000:
         ap.error('speed must be in (0, 2] and chunk-ms must be between 40 and 1000')
 

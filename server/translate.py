@@ -1,8 +1,7 @@
 """Translation backends.
 
-Priority: DeepSeek chat API (OpenAI-compatible) when a key is configured.
-A public Google endpoint and a mock backend exist so the pipeline can be
-exercised / demoed without a key; neither is used when DeepSeek is available.
+DeepSeek is selected when a key is configured. The default without a key
+is ASR only. Public Google and the offline mock remain explicit options.
 """
 from __future__ import annotations
 
@@ -22,6 +21,8 @@ from .translation_cache import LruCache, TranslationStats, usage_values
 
 DEEPSEEK_BASE = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+MAX_PROVIDER_BYTES = 64 * 1024
+MAX_TRANSLATION_CHARS = 8192
 
 PROMPT_VERSION = "subtitle-v2"
 SYSTEM_PROMPTS = {
@@ -105,13 +106,15 @@ class DeepSeekTranslator(Translator):
     name = "deepseek"
 
     def __init__(self, api_key: str, base: str = DEEPSEEK_BASE, model: str = DEEPSEEK_MODEL,
-                 *, prompt_version: str = PROMPT_VERSION, temperature: float = 0.2, max_tokens: int = 512):
+                 *, prompt_version: str = PROMPT_VERSION, temperature: float = 0.2, max_tokens: int = 512,
+                 trust_env: bool | None = None):
         self.api_key = api_key
         self.base = base.rstrip("/")
         self.model = model
         self.prompt_version = prompt_version
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.trust_env = (os.environ.get("DEEPSEEK_TRUST_ENV") == "1") if trust_env is None else trust_env
         self._session: aiohttp.ClientSession | None = None
         self._sem = asyncio.Semaphore(2)
 
@@ -134,7 +137,8 @@ class DeepSeekTranslator(Translator):
 
     async def _sess(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12, connect=4))
+            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12, connect=4),
+                                                  trust_env=self.trust_env)
         return self._session
 
     async def translate(self, text: str, target: str = "zh", context: str | ConversationSnapshot = "") -> Translation:
@@ -155,7 +159,12 @@ class DeepSeekTranslator(Translator):
                                              headers={"Authorization": f"Bearer {request.api_key}"}) as response:
                             if response.status != 200:
                                 raise RuntimeError(f"deepseek http {response.status}")
-                            data = await response.json()
+                            raw = bytearray()
+                            async for chunk in response.content.iter_chunked(4096):
+                                if len(raw) + len(chunk) > MAX_PROVIDER_BYTES:
+                                    raise InvalidTranslation("deepseek response exceeds the size limit")
+                                raw.extend(chunk)
+                            data = json.loads(raw)
                             usage = data.get("usage") if isinstance(data, dict) else None
                             choices = data.get("choices") if isinstance(data, dict) else None
                             choice = choices[0] if isinstance(choices, list) and choices else None
@@ -163,8 +172,8 @@ class DeepSeekTranslator(Translator):
                             if not isinstance(content, str) or not content.strip() or choice.get("finish_reason") != "stop":
                                 raise InvalidTranslation("deepseek returned an empty or incomplete translation")
                             out = clean_translation(content)
-                            if not out:
-                                raise InvalidTranslation("deepseek returned an empty translation")
+                            if not out or len(out) > MAX_TRANSLATION_CHARS:
+                                raise InvalidTranslation("deepseek returned an empty or oversized translation")
                             return Translation(out, self.name, int((time.perf_counter() - t0) * 1000), usage_values(usage))
                     finally:
                         stats.finish((time.perf_counter() - started) * 1000, usage)
@@ -200,7 +209,10 @@ class GooglePublicTranslator(Translator):
         url = "https://translate.googleapis.com/translate_a/single?" + urllib.parse.urlencode(params)
         req = urllib.request.Request(url, headers={"User-Agent": self._ua})
         with urllib.request.urlopen(req, timeout=8) as r:
-            return r.read().decode("utf-8", "replace")
+            body = r.read(MAX_PROVIDER_BYTES + 1)
+            if len(body) > MAX_PROVIDER_BYTES:
+                raise InvalidTranslation("Public translation response exceeds the size limit")
+            return body.decode("utf-8", "replace")
 
     async def translate(self, text: str, target: str = "zh", context: str = "") -> Translation:
         t0 = time.perf_counter()
@@ -214,8 +226,8 @@ class GooglePublicTranslator(Translator):
         try:
             body = await asyncio.to_thread(self._fetch, params)
             data = json.loads(body)
-        except Exception as e:  # noqa: BLE001 - surface a readable fallback error
-            raise RuntimeError(f"public translator unavailable: {e}") from e
+        except Exception:
+            raise RuntimeError("public translator unavailable") from None
         out = "".join(seg[0] for seg in data[0] if seg and seg[0])
         return Translation(clean_translation(out), self.name, int((time.perf_counter() - t0) * 1000))
 
@@ -232,10 +244,17 @@ class MockTranslator(Translator):
         return Translation(f"[{target}] {text}", self.name, 0)
 
 
+class DisabledTranslator(Translator):
+    name = "disabled"
+
+    async def translate(self, text: str, target: str = "zh", context: str = "") -> Translation:
+        return Translation("", self.name, 0)
+
+
 def create_translator(mode: str = "auto", api_key: str | None = None) -> Translator:
     key = api_key or os.environ.get("DEEPSEEK_API_KEY", "").strip()
     if mode == "auto":
-        mode = "deepseek" if key else "google-public"
+        mode = "deepseek" if key else "disabled"
     if mode == "deepseek":
         if not key:
             raise RuntimeError(
@@ -247,6 +266,8 @@ def create_translator(mode: str = "auto", api_key: str | None = None) -> Transla
         return GooglePublicTranslator()
     if mode == "mock":
         return MockTranslator()
+    if mode in ("off", "disabled"):
+        return DisabledTranslator()
     raise ValueError(f"unknown translator mode: {mode}")
 
 

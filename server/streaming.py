@@ -172,7 +172,7 @@ class StreamSession:
             raise AudioBacklogError('Audio buffer limit exceeded; slow down')
         self.stats.chunks += 1
         self.stats.audio_seconds += len(pcm) / SAMPLE_RATE
-        self._q.put_nowait(pcm)
+        self._q.put_nowait(np.clip(pcm, -1, 1))
         self._queued_bytes += pcm.nbytes
 
     @property
@@ -362,6 +362,9 @@ class StreamSession:
         context = self.conversation.snapshot(text, self.cfg.target_lang, self.cfg.context_turns,
                                              self.cfg.glossary, self.cfg.domain)
         self.conversation.remember(text)
+        if isinstance(self.translator, TranslationPipeline) and self.translator.engine == "disabled":
+            self._emit({"type": "translation_cancelled", "id": seg_id})
+            return
         if len(self._translations) >= MAX_TRANSLATIONS:
             self.stats.translation_overflows += 1
             self.stats.translation_failures += 1

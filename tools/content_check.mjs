@@ -37,7 +37,7 @@ const files = new Map([
     .map(name => ['/ext-assets/wasm/' + name, resolve('extension/wasm', name)]),
 ]);
 if (WASM) for (const file of files.values()) assert(existsSync(file), 'Missing real-model fixture: ' + file);
-const popupFiles = new Set(['popup.html', 'popup.css', 'interface.css', 'caption-settings.js', 'asr-domain.js', 'popup.js']);
+const popupFiles = new Set(['popup.html', 'popup.css', 'interface.css', 'caption-settings.js', 'asr-domain.js', 'service-url.js', 'popup.js']);
 const profile = mkdtempSync(join(tmpdir(), 'jls-content-'));
 const server = createServer((req, res) => {
   const popupFile = req.url.startsWith('/popup/') && req.url.slice('/popup/'.length);

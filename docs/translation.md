@@ -14,6 +14,8 @@
 
 默认 `deepseek-chat`、`temperature=0.2`、`max_tokens=512`、非流式。Python 支持 `DEEPSEEK_MODEL` / `DEEPSEEK_BASE_URL`。默认接口为 `https://api.deepseek.com/chat/completions`。
 
+本地服务只在配置有效翻译器时联网。需要使用系统 HTTPS 代理时可显式设置 `DEEPSEEK_TRUST_ENV=1`。服务与浏览器限制响应体为 64 KiB，译文最多 8192 字符。
+
 可选多轮上下文保留最近 3、4 或 5 条日语 final，每条最多 512 个字符。本地服务使用 `--context-turns 3`，浏览器可在高级设置中启用。请求可附带已匹配的节目、企划及最多 8 个相关译名。翻译指令要求保留口头修正、吐槽和自然的省略，只输出当前句的译文。
 
 日语转写保留例如「藤田ことね」的日语规范形。简体中文和英语可分别选用「藤田琴音」与「Kotone Fujita」。本地服务可用 `--translation-glossary` 指定有版本号的译名文件。 [默认译名词表](../extension/asr-terms/translation.json)

@@ -98,6 +98,7 @@ async function start(msg) {
   await dispose(old);
   check(capture);
   try {
+    const endpoint = local ? JLSServerURL.checked(msg.serverUrl || 'ws://127.0.0.1:8765/ws', msg.allowRemote) : null;
     const media = navigator.mediaDevices.getUserMedia({
       audio: { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: msg.streamId } }, video: false,
     });
@@ -129,7 +130,7 @@ async function start(msg) {
       if (msg.contextTurns !== undefined) settings.context_turns = msg.contextTurns;
       if (msg.localMode !== undefined) settings.mode = msg.localMode;
       if (typeof msg.agent === 'boolean') settings.agent = msg.agent;
-      await connect(capture, msg.serverUrl || 'ws://127.0.0.1:8765/ws', msg.target || 'zh', msg.serverToken || '', settings);
+      await connect(capture, endpoint, msg.target || 'zh', msg.serverToken || '', settings);
       check(capture);
     } else {
       capture.engineStarted = true;

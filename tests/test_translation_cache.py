@@ -159,6 +159,15 @@ class TranslationCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.requests), 5)
         self.assertEqual(self.pipe.snapshot()['api_requests'], 5)
 
+    async def test_oversized_provider_body_is_rejected_without_cache_or_retry(self):
+        self.content = "x" * 70_000
+        with self.assertRaisesRegex(InvalidTranslation, "size limit"):
+            await self.pipe.translate("日文", "zh")
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(self.pipe.snapshot()["cache_entries"], 0)
+        self.content = "译文"
+        self.assertEqual((await self.pipe.translate("日文", "zh")).text, "译文")
+
     async def test_http_retries_are_actual_calls_and_errors_do_not_echo_provider_body(self):
         self.status = 500
         with self.assertRaisesRegex(RuntimeError, '^deepseek translation failed$'):

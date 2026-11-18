@@ -46,7 +46,7 @@ from server.streaming import AudioBacklogError, SessionConfig, StreamSession, Va
 from server.translate import TranslationPipeline, create_translator  # noqa: E402
 from server.security import (  # noqa: E402
     AUTH_TIMEOUT, LOCAL_HOSTS, MAX_CONNECTIONS, MAX_FRAME_BYTES,
-    RateBudget, valid_host, valid_origin,
+    RateBudget, local_access_token, valid_host, valid_origin, validate_access_token,
 )
 from server.ws_events import ClientEvents  # noqa: E402
 
@@ -78,9 +78,7 @@ class AppState:
         self.fallback_from = fallback_from
         self.episodes = episodes or EpisodeCatalog()
         self.capabilities = asdict(getattr(asr, "capabilities", Capabilities()))
-        self.access_token = access_token or secrets.token_urlsafe(32)
-        if len(self.access_token) < 32 or not self.access_token.isascii():
-            raise ValueError("Access token must contain at least 32 ASCII characters")
+        self.access_token = validate_access_token(access_token or secrets.token_urlsafe(32))
         self.allowed_hosts = set(allowed_hosts or LOCAL_HOSTS)
         self.sockets: set[web.WebSocketResponse] = set()
         self.sessions = 0
@@ -325,9 +323,14 @@ def load_local_config() -> dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception as e:  # noqa: BLE001
-        print(f"[jls] config.local.json 读取失败：{e}")
+        with path.open(encoding="utf-8") as file:
+            text = file.read(65_537)
+        data = json.loads(text) if len(text) <= 65_536 else None
+        if not isinstance(data, dict):
+            raise ValueError("Expected a JSON configuration object")
+        return data
+    except (OSError, ValueError):
+        print("[jls] config.local.json 读取失败")
         return {}
 
 
@@ -336,6 +339,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default=cfg.get("host", "127.0.0.1"))
     ap.add_argument("--port", type=int, default=int(cfg.get("port", 8765)))
+    ap.add_argument("--token-file", type=Path, default=cfg.get("token_file", ROOT / "out" / "access-token"))
     ap.add_argument(
         "--translator",
         default=os.environ.get("JLSUBS_TRANSLATOR", cfg.get("translator", "auto")),
@@ -407,8 +411,13 @@ def main() -> int:
             review = ReviewStore(args.agent_audit)
         except (OSError, sqlite3.Error):
             print("[jls] 无法打开本地审核文件，字幕服务继续运行")
-    translator = TranslationPipeline(create_translator(args.translator, api_key))
-    state = AppState(asr, translator, access_token=os.environ.get("JLSUBS_ACCESS_TOKEN") or cfg.get("access_token"),
+    explicit_token = os.environ.get("JLSUBS_ACCESS_TOKEN") or cfg.get("access_token")
+    try:
+        token = local_access_token(explicit_token, args.token_file)
+        translator = TranslationPipeline(create_translator(args.translator, api_key))
+    except (ValueError, OSError, RuntimeError) as exc:
+        ap.error(str(exc))
+    state = AppState(asr, translator, access_token=token,
                      allowed_hosts=LOCAL_HOSTS | set(args.allow_host), vad=vad, fallback_from=fallback_from,
                      episodes=episodes, agent_enabled=args.agent, secondary=secondary,
                      agent_budget_ms=args.agent_budget_ms, review=review, context_turns=args.context_turns,
@@ -419,10 +428,11 @@ def main() -> int:
         print(f"[jls] 无法加载 {fallback_from}，已切换到 {asr.name}")
     if translator.engine == "deepseek":
         print(f"[jls] deepseek model={os.environ.get('DEEPSEEK_MODEL', 'deepseek-chat')}")
-    elif translator.engine == "google-public":
-        print("[jls] 未配置 DEEPSEEK_API_KEY，翻译使用公共端点（仅用于本地试用）")
+    elif translator.engine == "disabled":
+        print("[jls] 仅显示日语字幕。可配置 DeepSeek 以启用翻译")
     print(f"[jls] http://{args.host}:{args.port}/  ws://{args.host}:{args.port}/ws")
-    print(f"[jls] 本地服务访问令牌（填入扩展服务模式）：{state.access_token}")
+    if not explicit_token:
+        print(f"[jls] 本地服务访问令牌文件：{args.token_file.resolve()}")
     web.run_app(build_app(state, dev_assets=args.dev_assets), host=args.host, port=args.port, print=None)
     return 0
 

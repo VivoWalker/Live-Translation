@@ -194,7 +194,7 @@
     const token = accessToken.value.trim();
     if (!token) {
       setStatus('需要令牌', 'error');
-      showMessage('请填写服务终端显示的访问令牌', true);
+      showMessage('请填写本地服务访问令牌', true);
       accessToken.focus();
       return;
     }

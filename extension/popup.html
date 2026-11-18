@@ -71,7 +71,7 @@
         </label>
         <label class="field wide" id="token-field" hidden>
           <span>本地服务访问令牌</span>
-          <input id="server-token" type="password" placeholder="输入终端显示的令牌" autocomplete="off">
+          <input id="server-token" type="password" placeholder="输入本地访问令牌" autocomplete="off">
         </label>
         <details class="advanced wide">
           <summary>高级设置</summary>
@@ -109,6 +109,9 @@
                 <option value="off">关闭</option>
               </select>
             </label>
+            <label class="remote-consent wide" id="remote-field" hidden>
+              <input id="allow-remote" type="checkbox">允许将标签页音频发送到远程服务
+            </label>
             <p class="advanced-note wide" id="service-note" hidden>模型和录播说话人分离由本地服务配置。</p>
           </div>
         </details>
@@ -130,6 +133,7 @@
   </footer>
   <script src="caption-settings.js"></script>
   <script src="asr-domain.js"></script>
+  <script src="service-url.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
