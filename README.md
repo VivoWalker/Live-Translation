@@ -17,6 +17,16 @@
 
 ![Live Translation 本地服务演示页](docs/demo-page.png)
 
+## v0.4.5 实验预发布
+
+本次发布包含 Agentic ASR Phase 2。浏览器内的默认识别方式为 SenseVoice WASM，留空 DeepSeek Key 可显示日语原文。
+
+- **本地 ASR 复查**会根据实际推理耗时和积压调整复查频率，超时保留主模型结果。离线修订支持更长预算与多模型比较。弹窗显示服务实际运行的模型、回退及第二模型状态。 [复查与审核](docs/agentic-asr.md)
+- **日语专名**按核验来源和语境决定是否替换。自动模式优先匹配节目和企划。标题未匹配时，可保留原文、使用自选词库或启用保守直播用语。 [领域词表](docs/asr-domain.md)
+- **字幕交付**修复迟到预览覆盖、WebSocket 发送积压及重启时的清屏竞争。译文继续按分段 ID 回填。 [版本变更](CHANGELOG.md)
+
+云端已验证真实 CPU ASR、SenseVoice WASM 和 Mock 翻译链路。真实声优直播准确率、Agent 复查净收益、RTX 5070 Laptop 与完整工具栏采集留待本地验收。 [GitHub 预发布下载](https://github.com/VivoWalker/Live-Translation/releases/tag/v0.4.5) · [云端验收](docs/phase2-validation.md) · [Windows / RTX 验收](docs/local-validation.md)
+
 ## 为观看体验设计
 
 | 能力 | 体验 |
@@ -34,13 +44,13 @@
 
 需要 Chrome / Edge 116 或更新版本。需要中文或英文译文时，准备可用的 DeepSeek API Key。
 
-1. 下载本仓库并解压到固定目录，或执行：
+1. 下载 `Live-Translation-extension.zip` 并解压到固定目录。需要本地 Python 服务时，可检出同版源码。 [v0.4.5 实验预发布](https://github.com/VivoWalker/Live-Translation/releases/tag/v0.4.5)
 
    ```sh
-   git clone https://github.com/VivoWalker/Live-Translation.git
+   git clone --branch v0.4.5 https://github.com/VivoWalker/Live-Translation.git
    ```
 
-2. 打开 `chrome://extensions` 或 `edge://extensions`，开启「开发者模式」，点击「加载已解压的扩展」，选择仓库中的 **`extension/`** 目录。
+2. 打开 `chrome://extensions` 或 `edge://extensions`，开启「开发者模式」，点击「加载已解压的扩展」，选择解压目录或源码中的 **`extension/`** 目录。
 3. 打开有日语音频的普通网页，点击扩展图标。选择「浏览器内」后点击「开始字幕」。填写 DeepSeek Key 可开启所选语言的翻译。
 4. 首次使用会下载约 **240 MB** 识别模型，随后显示日语字幕与可用的译文。
 
@@ -106,7 +116,7 @@ python -m unittest discover -s tests
 node --test tests/*.test.mjs
 ```
 
-开发分支包含 Python、JavaScript、WebSocket 与 Chromium 回归，以及同条件 CPU 模型对照。 [开发指南](docs/development.md) · [Benchmark](docs/benchmark.md) · [Phase 2 云端验收](docs/phase2-validation.md) · [Windows / RTX 本地验收](docs/local-validation.md) · [CHANGELOG](CHANGELOG.md)
+GitHub Actions 执行 Python、JavaScript、WebSocket 与 Chromium 回归。CPU 模型对照、复查超时与字幕交付的实测口径见验收记录。 [开发指南](docs/development.md) · [Benchmark](docs/benchmark.md) · [Phase 2 云端验收](docs/phase2-validation.md) · [CHANGELOG](CHANGELOG.md)
 
 ## 使用边界与排查
 
