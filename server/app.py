@@ -28,19 +28,20 @@ import time
 from pathlib import Path
 
 import numpy as np
-from aiohttp import WSMsgType, web
+from aiohttp import ClientConnectionError, WSMsgType, web
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from server.asr import Recognizer, create_recognizer  # noqa: E402
 from server.asr_domain import PACKS, PROFILES, normalize_packs  # noqa: E402
-from server.streaming import SessionConfig, StreamSession  # noqa: E402
+from server.streaming import AudioBacklogError, SessionConfig, StreamSession, VadSettings  # noqa: E402
 from server.translate import TranslationPipeline, create_translator  # noqa: E402
 from server.security import (  # noqa: E402
     AUTH_TIMEOUT, LOCAL_HOSTS, MAX_CONNECTIONS, MAX_FRAME_BYTES,
     RateBudget, valid_host, valid_origin,
 )
+from server.ws_events import ClientEvents  # noqa: E402
 
 WEB_DIR = ROOT / "web"
 
@@ -48,10 +49,11 @@ WEB_DIR = ROOT / "web"
 class AppState:
     def __init__(
         self, asr: Recognizer, translator: TranslationPipeline, *,
-        access_token: str | None = None, allowed_hosts: set[str] | None = None,
+        access_token: str | None = None, allowed_hosts: set[str] | None = None, vad: VadSettings = VadSettings(),
     ):
         self.asr = asr
         self.translator = translator
+        self.vad = vad
         self.access_token = access_token or secrets.token_urlsafe(32)
         if len(self.access_token) < 32 or not self.access_token.isascii():
             raise ValueError("Access token must contain at least 32 ASCII characters")
@@ -63,12 +65,15 @@ class AppState:
         self.total_decode_ms = 0.0
         self.total_finals = 0
         self.total_translate_ms = 0.0
+        self.total_ws_overflows = 0
+        self.total_audio_overflows = 0
 
     def add(self, stats) -> None:
         self.total_audio_s += stats.audio_seconds
         self.total_decode_ms += stats.decode_ms
         self.total_finals += stats.finals
         self.total_translate_ms += stats.translate_ms
+        self.total_audio_overflows += stats.audio_overflows
 
     @property
     def engine(self) -> str:
@@ -99,10 +104,11 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
     if len(state.sockets) >= MAX_CONNECTIONS:
         raise web.HTTPServiceUnavailable(text="Connection limit reached")
     # aiohttp treats max_msg_size as exclusive; the protocol allows 64 KiB.
-    ws = web.WebSocketResponse(max_msg_size=MAX_FRAME_BYTES + 1, heartbeat=30, compress=False)
+    ws = web.WebSocketResponse(max_msg_size=MAX_FRAME_BYTES + 1, heartbeat=30, compress=False, timeout=2)
     state.sockets.add(ws)  # Reserve before the first await, including pending auth.
     session = None
     writer_task = None
+    out = ClientEvents()
     try:
         await ws.prepare(request)
         try:
@@ -119,23 +125,28 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
             await ws.close(code=1008, message=b"Access token required")
             return ws
 
-        out: asyncio.Queue[tuple[int, dict]] = asyncio.Queue(maxsize=64)
-        def on_event(event):
-            if not out.full():
-                out.put_nowait((session.translation_epoch if session else 0, event))
-
-        cfg = SessionConfig()
-        session = StreamSession(state.asr, state.translator, on_event, cfg)
+        cfg = SessionConfig(vad=state.vad)
+        try:
+            session = StreamSession(state.asr, state.translator, out.put, cfg)
+        except (OSError, RuntimeError):
+            await ws.close(code=1011, message=b"VAD unavailable; verify local model")
+            return ws
         await session.start()
         state.sessions += 1
+
         async def writer():
-            while True:
-                epoch, event = await out.get()
-                is_translation = event["type"] == "translation" or event.get("scope") == "translate"
-                if not is_translation or epoch == session.translation_epoch:
-                    await ws.send_json(event)
-        writer_task = asyncio.create_task(writer())
+            try:
+                while (event := await out.get()) is not None:
+                    async with asyncio.timeout(2):
+                        await ws.send_json(event)
+            except (TimeoutError, ClientConnectionError, OSError, RuntimeError):
+                out.fail(1013, b"Subtitle client could not keep up")
+            if out.failure:
+                code, reason = out.failure
+                await ws.close(code=code, message=reason, drain=False)
+
         await ws.send_json({"type": "ready", "asr": state.asr.name, "translator": state.engine, "source": "ja", "target": "zh"})
+        writer_task = asyncio.create_task(writer())
         audio_budget = RateBudget(128000, 256000)  # Up to 2x realtime, four-second burst.
         control_budget = RateBudget(20, 40)
         message_budget = RateBudget(50, 100)
@@ -159,18 +170,22 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                         if target not in ("zh", "en"):
                             raise ValueError("Unsupported target language")
                         await session.set_target(target)
-                        await ws.send_json({"type": "config", "ok": True, "target": target})
+                        out.put({"type": "config", "ok": True, "target": target})
                     elif kind == "ping":
-                        await ws.send_json({"type": "pong", "t": time.time()})
+                        out.put({"type": "pong", "t": time.time()})
                     elif kind == "stats":
-                        await ws.send_json({"type": "stats", **session.stats.as_dict(), "translation": session.translation_stats()})
+                        out.put({"type": "stats", **session.stats.as_dict(), "translation": session.translation_stats(),
+                                 "queue": out.stats(), "audio_queue_bytes": session.queued_audio_bytes})
                 elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
                     break
+            except AudioBacklogError:
+                out.fail(1013, b"ASR audio backlog exceeded")
+                break
             except (ValueError, TypeError):
                 await ws.close(code=1008, message=b"Invalid input or resource limit exceeded")
                 break
     finally:
-        if writer_task is not None:
+        if writer_task is not None and not out.failure:
             writer_task.cancel()
         try:
             if session is not None:
@@ -178,8 +193,12 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 await session.close()
                 state.add(session.stats)
             if writer_task is not None:
-                await asyncio.gather(writer_task, return_exceptions=True)
+                try:
+                    await asyncio.wait_for(asyncio.gather(writer_task, return_exceptions=True), timeout=4)
+                except TimeoutError:
+                    await ws.close(code=1013, message=b"Subtitle backpressure", drain=False)
         finally:
+            state.total_ws_overflows += out.overflows
             state.sockets.discard(ws)
     return ws
 
@@ -200,6 +219,8 @@ async def health(request: web.Request) -> web.Response:
             "audio_seconds": round(state.total_audio_s, 2),
             "decode_ms": round(state.total_decode_ms, 1),
             "finals": state.total_finals,
+            "ws_queue_overflows": state.total_ws_overflows,
+            "audio_queue_overflows": state.total_audio_overflows,
             "cpu_s": round(time.process_time(), 2),
         }
     )
@@ -215,8 +236,9 @@ def build_app(state: AppState, *, dev_assets: bool = False) -> web.Application:
         "captions.js": "caption-overlay.js",
         "caption-settings.js": "caption-settings.js",
         "interface.css": "interface.css",
+        "pcm-worklet.js": "pcm-worklet.js",
     }
-    public_assets = {"app.js", "style.css", "pcm-worklet.js", "sample-ja.wav", *extension_assets}
+    public_assets = {"app.js", "style.css", "sample-ja.wav", *extension_assets}
     if dev_assets:
         public_assets.update({"test-player.html", "engine-test.html", "wasm-test.html", "worklet-test.html", "worklet-probe.js"})
     async def static_asset(request):
@@ -267,6 +289,9 @@ def main() -> int:
         default=int(os.environ.get("JLSUBS_ASR_THREADS", cfg.get("asr_threads", 4))),
     )
     ap.add_argument("--model-dir", default=cfg.get("model_dir"))
+    ap.add_argument("--vad-min-silence", type=float, default=cfg.get("vad_min_silence", .4))
+    ap.add_argument("--vad-max-segment", type=float, default=cfg.get("vad_max_segment", 12))
+    ap.add_argument("--vad-overlap", type=float, default=cfg.get("vad_overlap", 0))
     ap.add_argument("--asr", choices=("sensevoice", "whisper"),
                     default=os.environ.get("JLSUBS_ASR", cfg.get("asr", "sensevoice")),
                     help="Local recognition backend (default: sensevoice)")
@@ -285,12 +310,14 @@ def main() -> int:
 
     api_key = os.environ.get("DEEPSEEK_API_KEY") or cfg.get("deepseek_api_key")
     try:
+        vad = VadSettings(args.vad_min_silence, args.vad_max_segment, args.vad_overlap)
         asr = create_recognizer(args.asr, model_dir=args.model_dir, language="ja", num_threads=args.threads,
                                 asr_domain=selection, asr_terms=args.asr_terms)
     except (OSError, ValueError) as exc:
         ap.error(str(exc))
     translator = TranslationPipeline(create_translator(args.translator, api_key))
-    state = AppState(asr, translator, access_token=os.environ.get("JLSUBS_ACCESS_TOKEN") or cfg.get("access_token"), allowed_hosts=LOCAL_HOSTS | set(args.allow_host))
+    state = AppState(asr, translator, access_token=os.environ.get("JLSUBS_ACCESS_TOKEN") or cfg.get("access_token"),
+                     allowed_hosts=LOCAL_HOSTS | set(args.allow_host), vad=vad)
     active_packs = ("custom" if selection != "off" else "off") if args.asr_terms else ",".join(normalize_packs(selection)) or "off"
     print(f"[jls] asr={asr.name} threads={args.threads} asr_packs={active_packs} translator={translator.engine}")
     if translator.engine == "deepseek":

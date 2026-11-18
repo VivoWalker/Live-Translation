@@ -48,6 +48,14 @@ def looks_complete(text: str) -> bool:
     return bool(text) and text[-1] in _END_PUNCT
 
 
+def trim_overlap(previous: str, current: str) -> str:
+    """Remove a short exact continuation shared by two overlapping decodes."""
+    for size in range(min(8, len(previous), len(current) - 1), 2, -1):
+        if previous[-size:] == current[:size] and current[size:].strip():
+            return current[size:].lstrip()
+    return current
+
+
 def clean_translation(text: str) -> str:
     t = (text or "").strip()
     t = re.sub(r"^(译文|翻译|中文)[:：]\s*", "", t)

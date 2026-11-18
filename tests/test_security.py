@@ -21,9 +21,13 @@ TOKEN = 'local-test-access-token-0123456789abcdef'
 
 class FakeVad:
     in_speech = False
+    def __init__(self, **kwargs):
+        pass
+
     def accept(self, audio):
         pass
-    def pop_segments(self, since=0):
+
+    def pop_spans(self, since=0):
         return []
 
 

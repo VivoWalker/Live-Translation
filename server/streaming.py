@@ -16,25 +16,40 @@ from dataclasses import dataclass
 import numpy as np
 
 from .asr import SAMPLE_RATE, SileroVad, Recognizer
-from .text import normalize_ja, stable_prefix
+from .text import normalize_ja, stable_prefix, trim_overlap
 from .translate import TranslationPipeline
 from .security import MAX_BUFFERED_BYTES, MAX_FRAME_BYTES
 
 VAD_FRAME = 512
-MAX_SEGMENT = 12.0
 MAX_WINDOW = 8.0
 KEEP_SECONDS = 20.0
+PREVIEW_BACKLOG = 19_200  # 300 ms of queued float32 PCM
 MAX_TRANSLATIONS = 32
 TRANSLATION_CONCURRENCY = 3
 TRANSLATION_DEADLINE = 28.0
 
-_TIMEOUT = object()
+class AudioBacklogError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class VadSettings:
+    min_silence: float = 0.4
+    max_segment: float = 12.0
+    overlap: float = 0.0
+
+    def __post_init__(self) -> None:
+        for name, low, high in (("min_silence", .2, 1.2), ("max_segment", 8, 16), ("overlap", 0, .30)):
+            value = getattr(self, name)
+            if type(value) not in (int, float) or not low <= value <= high:
+                raise ValueError(f"VAD {name} must be between {low} and {high} seconds")
 
 
 @dataclass
 class SessionConfig:
     target_lang: str = "zh"
     source_lang: str = "ja"
+    vad: VadSettings = VadSettings()
 
 
 @dataclass
@@ -50,6 +65,9 @@ class Stats:
     translation_timeouts: int = 0
     translation_overflows: int = 0
     translation_cancelled: int = 0
+    audio_overflows: int = 0
+    preview_backlog_skips: int = 0
+    decode_failures: int = 0
 
     def as_dict(self) -> dict:
         dec = self.decodes or 1
@@ -65,6 +83,9 @@ class Stats:
             "translation_timeouts": self.translation_timeouts,
             "translation_overflows": self.translation_overflows,
             "translation_cancelled": self.translation_cancelled,
+            "audio_overflows": self.audio_overflows,
+            "preview_backlog_skips": self.preview_backlog_skips,
+            "decode_failures": self.decode_failures,
         }
 
 
@@ -80,10 +101,12 @@ class StreamSession:
         self.translator = translator.new_session() if isinstance(translator, TranslationPipeline) else translator
         self.on_event = on_event
         self.cfg = config or SessionConfig()
-        self.vad = SileroVad()
+        self.vad = SileroVad(min_silence=self.cfg.vad.min_silence)
+        self._max_segment = round(self.cfg.vad.max_segment * SAMPLE_RATE)
+        self._overlap = round(self.cfg.vad.overlap * SAMPLE_RATE)
         self.stats = Stats()
 
-        self._q: asyncio.Queue[np.ndarray | None] = asyncio.Queue(maxsize=64)
+        self._q: asyncio.Queue[np.ndarray] = asyncio.Queue(maxsize=64)
         self._queued_bytes = 0
         self._chunks: list[np.ndarray] = []
         self._chunk_starts: list[int] = []
@@ -94,6 +117,7 @@ class StreamSession:
         self._seg_start = 0
         self._seg_id = 0
         self._finalized_until = 0
+        self._last_forced_text = ""
         self._last_partial_at = 0.0
         self._last_partial_total = 0
         self._last_hyp = ""
@@ -123,11 +147,16 @@ class StreamSession:
         if not pcm.size:
             return
         if self._queued_bytes + pcm.nbytes > MAX_BUFFERED_BYTES or self._q.full():
-            raise ValueError('Audio buffer limit exceeded; slow down')
+            self.stats.audio_overflows += 1
+            raise AudioBacklogError('Audio buffer limit exceeded; slow down')
         self.stats.chunks += 1
         self.stats.audio_seconds += len(pcm) / SAMPLE_RATE
         self._q.put_nowait(pcm)
         self._queued_bytes += pcm.nbytes
+
+    @property
+    def queued_audio_bytes(self) -> int:
+        return self._queued_bytes
 
     async def close(self) -> None:
         if self._closed:
@@ -183,19 +212,27 @@ class StreamSession:
         except Exception:  # noqa: BLE001 - never break audio processing on UI errors
             pass
 
-    def _feed_vad(self, pcm: np.ndarray) -> None:
-        self._vad_pending = (
-            np.concatenate([self._vad_pending, pcm]) if self._vad_pending.size else pcm
-        )
-        while len(self._vad_pending) >= VAD_FRAME:
-            frame = self._vad_pending[:VAD_FRAME]
-            self._vad_pending = self._vad_pending[VAD_FRAME:]
-            self.vad.accept(frame)
+    async def _feed_vad(self, pcm: np.ndarray) -> None:
+        pending = np.concatenate([self._vad_pending, pcm]) if self._vad_pending.size else pcm
+        start = self._total - len(pending)
+        consumed = len(pending) - len(pending) % VAD_FRAME
+        for offset in range(0, consumed, VAD_FRAME):
+            end = offset + VAD_FRAME
+            self.vad.accept(pending[offset:end])
+            await self._step(start + end, preview=False)
+        self._vad_pending = pending[consumed:].copy()
+        await self._maybe_preview(start + consumed)
 
     # ---------------------------------------------------------------- ASR/MT
     async def _decode(self, audio: np.ndarray) -> str:
         t0 = time.perf_counter()
-        text = await asyncio.to_thread(self.asr.transcribe, audio)
+        try:
+            text = await asyncio.to_thread(self.asr.transcribe, audio)
+        except Exception:
+            self.stats.decode_failures += 1
+            self._emit({"type": "error", "scope": "asr", "code": "asr_decode_failed",
+                        "message": "语音识别失败"})
+            return ""
         elapsed = (time.perf_counter() - t0) * 1000
         self._last_decode_ms = elapsed
         self.stats.decodes += 1
@@ -276,8 +313,8 @@ class StreamSession:
         task.add_done_callback(lambda _: self._translations.pop(seg_id, None))
         return task
 
-    async def _emit_partial(self) -> None:
-        end = self._total
+    async def _emit_partial(self, end: int | None = None) -> None:
+        end = self._total if end is None else end
         start = max(self._seg_start, int(end - MAX_WINDOW * SAMPLE_RATE))
         audio = self._slice(start, end)
         if len(audio) < SAMPLE_RATE * self.asr.min_partial_speech:
@@ -296,14 +333,17 @@ class StreamSession:
         # Preview text is provisional, even when it already has punctuation.
         # Only _finalize submits text to the translator.
 
-    async def _finalize(self, audio: np.ndarray, audio_end_ratio: float) -> None:
+    async def _finalize(self, audio: np.ndarray, audio_end_ratio: float, *, forced: bool = False) -> None:
+        overlap_text = self._last_forced_text if self._overlap else ""
+        self._last_forced_text = ""
         if len(audio) < SAMPLE_RATE * 0.3:
-            self._reset_segment()
             return
         text = await self._decode(audio)
         if not text:
-            self._reset_segment()
             return
+        text = trim_overlap(overlap_text, text)
+        if forced:
+            self._last_forced_text = text
         self.stats.finals += 1
         self._emit(
             {
@@ -311,69 +351,69 @@ class StreamSession:
                 "id": self._seg_id,
                 "text": text,
                 "t": round(audio_end_ratio, 2),
+                "t_start": round(max(0, audio_end_ratio - len(audio) / SAMPLE_RATE), 2),
+                "forced": forced,
                 "decode_ms": round(self._last_decode_ms, 1),
             }
         )
-        self._last_text = text
         self._schedule_translation(self._seg_id, text)
         self._seg_id += 1
-        self._reset_segment()
 
-    def _reset_segment(self) -> None:
-        self._seg_start = self._total
+    def _reset_segment(self, end: int) -> None:
+        self._seg_start = end
         self._last_hyp = ""
         self._last_text = ""
         self._last_partial_at = 0.0
-        self._last_partial_total = self._total
+        self._last_partial_total = end
 
     # ---------------------------------------------------------------- loop
-    async def _step(self) -> None:
+    async def _step(self, end: int | None = None, *, preview: bool = True) -> None:
+        end = self._total if end is None else end
         in_speech = self.vad.in_speech
+        overlap = self._overlap if self._last_forced_text else 0
+        segments = self.vad.pop_spans(since=max(0, self._finalized_until - overlap))
+        for segment in segments:
+            if segment.end <= self._finalized_until:
+                continue
+            await self._finalize(segment.samples, segment.end / SAMPLE_RATE)
+            self._finalized_until = segment.end
+            self._reset_segment(segment.end)
+
         if in_speech and not self._speech:
-            self._speech = True
-            self._seg_start = max(0, self._total - int(0.3 * SAMPLE_RATE))
+            self._seg_start = max(self._finalized_until, end - int(0.3 * SAMPLE_RATE))
             self._last_partial_at = time.monotonic()
             self._emit({"type": "speech_start", "id": self._seg_id})
         elif self._speech and not in_speech:
-            segments = self.vad.pop_segments(since=self._finalized_until)
-            self._speech = False
-            if segments:
-                await self._finalize(segments[-1], self._total / SAMPLE_RATE)
-            else:
-                self._reset_segment()
-            return
+            self._last_forced_text = ""
+            self._reset_segment(end)
+        self._speech = in_speech
 
-        if not self._speech:
+        if in_speech and end - self._seg_start >= self._max_segment:
+            boundary = self._seg_start + self._max_segment
+            start = max(0, self._seg_start - (self._overlap if self._last_forced_text else 0))
+            await self._finalize(self._slice(start, boundary), boundary / SAMPLE_RATE, forced=True)
+            self._finalized_until = boundary
+            self._reset_segment(boundary)
+        if preview:
+            await self._maybe_preview(end)
+
+    async def _maybe_preview(self, end: int) -> None:
+        if not self._speech or end <= self._last_partial_total:
             return
-        dur = (self._total - self._seg_start) / SAMPLE_RATE
-        if dur >= MAX_SEGMENT:
-            await self._finalize(self._slice(self._seg_start, self._total), self._total / SAMPLE_RATE)
-            self._finalized_until = self._total
-        elif (dur >= self.asr.min_partial_speech
-              and self._total > self._last_partial_total
-              and time.monotonic() - self._last_partial_at >= max(
-                  self.asr.partial_interval, self._last_decode_ms / 1000 * 1.5)):
-            self._last_partial_at = time.monotonic()
-            self._last_partial_total = self._total
-            await self._emit_partial()
+        now = time.monotonic()
+        if ((end - self._seg_start) / SAMPLE_RATE < self.asr.min_partial_speech
+                or now - self._last_partial_at < max(self.asr.partial_interval, self._last_decode_ms / 1000 * 1.5)):
+            return
+        self._last_partial_at = now
+        self._last_partial_total = end
+        if self._queued_bytes >= PREVIEW_BACKLOG:
+            self.stats.preview_backlog_skips += 1
+            return
+        await self._emit_partial(end)
 
     async def _run(self) -> None:
-        while True:
-            try:
-                item = await asyncio.wait_for(self._q.get(), timeout=0.05)
-            except asyncio.TimeoutError:
-                item = _TIMEOUT
-            if item is None:
-                break
-            if item is not _TIMEOUT:
-                self._queued_bytes -= item.nbytes
-                self._append(item)  # type: ignore[arg-type]
-                self._feed_vad(item)  # type: ignore[arg-type]
-            await self._step()
-
-        try:
-            self.vad.flush()
-            while self.vad.pop_segments():
-                pass
-        except Exception:  # noqa: BLE001
-            pass
+        while not self._closed:
+            item = await self._q.get()
+            self._queued_bytes -= item.nbytes
+            self._append(item)
+            await self._feed_vad(item)

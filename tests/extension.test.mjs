@@ -23,7 +23,7 @@ function media() {
   return { track, getTracks: () => [track], getAudioTracks: () => [track] };
 }
 function offscreen(engine = { init: async () => {}, stop() {}, stats: () => ({}) }) {
-  const requests = [], messages = [], sockets = [];
+  const requests = [], messages = [], sockets = [], nodes = [];
   let listener;
   class Context {
     constructor() { this.state = 'running'; this.audioWorklet = { addModule: async () => {} }; }
@@ -33,20 +33,23 @@ function offscreen(engine = { init: async () => {}, stop() {}, stats: () => ({})
   class Socket {
     constructor() { this.readyState = 1; this.sent = []; sockets.push(this); queueMicrotask(() => this.onopen()); }
     send(raw) {
-      this.sent.push(JSON.parse(raw));
+      this.sent.push(typeof raw === 'string' ? JSON.parse(raw) : raw);
       if (this.sent.length === 2) queueMicrotask(() => this.onmessage({ data: JSON.stringify({ type: 'ready', asr: 'whisper-base-int8', translator: 'mock' }) }));
     }
     close() { this.readyState = 3; }
   }
   const sandbox = vm.createContext({
     console, DOMException, setTimeout, clearTimeout, setInterval, clearInterval,
-    AudioContext: Context, AudioWorkletNode: class { constructor() { this.port = {}; } disconnect() {} },
+    AudioContext: Context, AudioWorkletNode: class {
+      constructor() { this.port = { postMessage() {} }; nodes.push(this); }
+      disconnect() {}
+    },
     WebSocket: Socket, JLSEngine: engine,
     navigator: { mediaDevices: { getUserMedia() { const request = deferred(); requests.push(request); return request.promise; } } },
     chrome: { runtime: { id: extensionId, getURL: extensionURL, sendMessage: async m => { messages.push(m); }, onMessage: { addListener(fn) { listener = fn; } } } },
   });
   vm.runInContext(read('offscreen.js'), sandbox);
-  return { requests, messages, sockets, send: message => dispatch(listener, message) };
+  return { requests, messages, sockets, nodes, send: message => dispatch(listener, message) };
 }
 
 test('late media is stopped after cancellation and cannot restart capture', async () => {
@@ -106,6 +109,39 @@ test('server mode authenticates and never starts the browser engine', async () =
   await context.send({ type: 'jls:offscreen-stop', sessionId: 'S' });
 });
 
+test('server capture reports buffered audio and stops at the hard byte limit', async () => {
+  const context = offscreen();
+  const started = context.send({ type: 'jls:offscreen-start', sessionId: 'S', engine: 'server' });
+  await tick();
+  const stream = media();
+  context.requests[0].resolve(stream);
+  assert.equal((await started).ok, true);
+  const socket = context.sockets[0], node = context.nodes[0];
+  socket.bufferedAmount = 70 * 1024;
+  node.port.onmessage({ data: new Float32Array(1600) });
+  assert.equal(context.messages.at(-1).phase, 'degraded');
+  assert.equal(socket.sent.length, 3);
+  socket.bufferedAmount = 128 * 1024;
+  node.port.onmessage({ data: new Float32Array(1600) });
+  assert.equal(context.messages.at(-1).phase, 'error');
+  assert.equal(socket.sent.length, 3);
+  assert.equal(stream.track.stopped, true);
+});
+
+test('worklet credit bounds unconsumed blocks and signals overrun once', () => {
+  const sent = [];
+  let processor;
+  vm.runInNewContext(read('pcm-worklet.js'), {
+    AudioWorkletProcessor: class { port = { postMessage(value) { sent.push(value); } }; },
+    registerProcessor(name, factory) { processor = new factory({ processorOptions: { maxPendingBlocks: 2 } }); },
+  });
+  const block = [[new Float32Array(1600)]];
+  processor.process(block);
+  processor.port.onmessage({ data: 'consumed' });
+  for (let i = 0; i < 4; i++) processor.process(block);
+  assert.deepEqual(sent.map(value => value.overrun || value.length), [1600, 1600, 1600, true]);
+});
+
 test('stop during engine initialization stops media and suppresses late progress', async () => {
   const initialization = deferred();
   let handler;
@@ -124,7 +160,7 @@ test('stop during engine initialization stops media and suppresses late progress
 });
 
 function engine({ runtimeReady = true, runtimeFailure = false, setupFailure = false, decodeFailure = false, cache, fetcher, domainFetcher, cryptoImpl = webcrypto, clock, requestTimeoutMs } = {}) {
-  let speech = true, moduleReady;
+  let speech = true, moduleReady, pendingSegment = false;
   let hypothesis = 'PRIVATE_TAB_A';
   let vadSegment = { samples: new Float32Array(9600), start: 0 };
   const decodedAudio = [];
@@ -148,7 +184,8 @@ function engine({ runtimeReady = true, runtimeFailure = false, setupFailure = fa
       requests.push({ ...request, url, options });
       return request.promise;
     },
-    createVad: () => ({ free() {}, acceptWaveform() {}, isDetected: () => speech, isEmpty: () => false, front: () => vadSegment, pop() {} }),
+    createVad: () => ({ free() {}, acceptWaveform() {}, isDetected: () => speech, isEmpty: () => !pendingSegment,
+      front: () => vadSegment, pop() { pendingSegment = false; } }),
     OfflineRecognizer: class {
       constructor(config) {
         recognizerConfig = config;
@@ -185,8 +222,8 @@ function engine({ runtimeReady = true, runtimeFailure = false, setupFailure = fa
     hypothesis(text) { hypothesis = text; },
     vadSegment(samples, start = 0) { vadSegment = { samples, start }; },
     speech(seconds) { speech = true; for (let i = 0; i < Math.round(seconds * 10); i++) sandbox.JLSEngine.feed(new Float32Array(1600)); },
-    endSpeech() { speech = false; sandbox.JLSEngine.feed(new Float32Array(1600)); },
-    utterance() { vadSegment = { samples: new Float32Array(9600), start: Math.round(sandbox.JLSEngine.stats().audio_seconds * 16000) }; speech = true; for (let i = 0; i < 6; i++) sandbox.JLSEngine.feed(new Float32Array(1600)); speech = false; sandbox.JLSEngine.feed(new Float32Array(1600)); },
+    endSpeech() { speech = false; pendingSegment = true; sandbox.JLSEngine.feed(new Float32Array(1600)); },
+    utterance() { vadSegment = { samples: new Float32Array(9600), start: Math.round(sandbox.JLSEngine.stats().audio_seconds * 16000) }; speech = true; for (let i = 0; i < 6; i++) sandbox.JLSEngine.feed(new Float32Array(1600)); this.endSpeech(); },
   };
 }
 

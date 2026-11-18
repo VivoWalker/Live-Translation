@@ -45,8 +45,9 @@ function showMessage(message, error = false) {
 
 function setPhase(next, message) {
   phase = next;
-  const active = ['starting', 'connected', 'capturing', 'stopping'].includes(phase);
-  const labels = { idle: '待开始', starting: '准备中', connected: '已连接', capturing: '字幕运行中', stopping: '正在停止', error: '需要处理' };
+  const active = ['starting', 'connected', 'capturing', 'degraded', 'stopping'].includes(phase);
+  const labels = { idle: '待开始', starting: '准备中', connected: '已连接', capturing: '字幕运行中',
+    degraded: '处理延迟', stopping: '正在停止', error: '需要处理' };
   $('status').textContent = labels[phase] || labels.idle;
   $('capture-status').dataset.phase = phase === 'error' ? 'error'
     : ['connected', 'capturing'].includes(phase) ? 'live' : active ? 'busy' : 'idle';
@@ -62,7 +63,7 @@ function setPhase(next, message) {
 function renderCaptureStatus(status) {
   if (phase === 'stopping' || !status?.phase) return;
   if (phase === 'starting' && status.phase === 'idle') return;
-  setPhase(status.phase, ['error', 'starting'].includes(status.phase) ? status.message : '');
+  setPhase(status.phase, ['error', 'starting', 'degraded'].includes(status.phase) ? status.message : '');
 }
 
 function renderFields() {

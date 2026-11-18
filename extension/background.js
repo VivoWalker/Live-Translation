@@ -138,8 +138,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
       } else {
         if (msg.phase === 'error') chrome.tabs.sendMessage(tabId, { type: 'jls:toast', text: msg.message, bad: true }).catch(() => {});
-        chrome.action.setBadgeText({ text: msg.phase === 'capturing' || msg.phase === 'connected' ? '●' : '' });
-        chrome.action.setBadgeBackgroundColor({ color: '#35d07f' });
+        chrome.action.setBadgeText({ text: ['capturing', 'connected', 'degraded'].includes(msg.phase) ? '●' : '' });
+        chrome.action.setBadgeBackgroundColor({ color: msg.phase === 'degraded' ? '#edb64d' : '#35d07f' });
       }
     }
   })().catch(() => {});

@@ -18,6 +18,17 @@
   const MAX_WINDOW_SEC = 7;
   const MAX_SEGMENT_SEC = 12;
   const KEEP_SEC = 20;
+  const DEFAULT_VAD = Object.freeze({ minSilence: 0.4, maxSegment: MAX_SEGMENT_SEC, overlap: 0 });
+
+  function vadSettings(options = {}) {
+    const settings = { ...DEFAULT_VAD, ...options };
+    for (const [key, min, max] of [['minSilence', .2, 1.2], ['maxSegment', 8, 16], ['overlap', 0, .3]]) {
+      if (!Number.isFinite(settings[key]) || settings[key] < min || settings[key] > max) {
+        throw new RangeError('无效的语音分段设置');
+      }
+    }
+    return settings;
+  }
 
   const MODEL_FILES = [
     {
@@ -262,6 +273,8 @@
   let segStart = 0;
   let segId = 0;
   let finalizedUntil = 0;
+  let lastForcedText = '';
+  let vadConfig = DEFAULT_VAD;
   let speaking = false;
   let lastPartialAt = 0;
   let partialInterval = PARTIAL_INTERVAL;
@@ -275,6 +288,7 @@
   let translateCount = 0;
   let translateMsTotal = 0;
   let lastDecodeMs = 0;
+  let previewBacklogSkips = 0;
 
   function emit(ev) {
     try {
@@ -427,6 +441,15 @@
     return a.slice(0, i);
   }
 
+  function trimOverlap(previous, text) {
+    const before = Array.from(previous), after = Array.from(text);
+    for (let size = Math.min(8, before.length, after.length - 1); size >= 3; size--) {
+      const tail = after.slice(size).join('').trimStart();
+      if (tail && before.slice(-size).join('') === after.slice(0, size).join('')) return tail;
+    }
+    return text;
+  }
+
   // ------------------------------------------------------------ translation
   function scheduleTranslation(id, text) {
     const state = translationState, ticket = translationEpoch;
@@ -510,17 +533,20 @@
   }
 
   function feedVad(data) {
-    let pending = vadPending.length ? new Float32Array(vadPending.length + data.length) : data;
+    const pending = vadPending.length ? new Float32Array(vadPending.length + data.length) : data;
     if (vadPending.length) {
       pending.set(vadPending, 0);
       pending.set(data, vadPending.length);
     }
+    const start = totalSamples - pending.length;
     let off = 0;
     while (pending.length - off >= VAD_WINDOW) {
       vad.acceptWaveform(pending.subarray(off, off + VAD_WINDOW));
       off += VAD_WINDOW;
+      advanceVad(start + off);
     }
     vadPending = pending.slice(off);
+    return start + off;
   }
 
   function decode(samples) {
@@ -543,75 +569,82 @@
     return domainCorrector.correct(normalizeJa(text));
   }
 
-  function resetSegment() {
-    segStart = totalSamples;
+  function resetSegment(end) {
+    segStart = end;
     lastHyp = '';
     lastText = '';
     lastPartialAt = 0;
   }
 
-  function finishSegment(audio, start) {
+  function finishSegment(audio, start, forced = false) {
+    const end = start + audio.length;
+    if (end <= finalizedUntil) return;
+    const overlap = lastForcedText ? Math.round(vadConfig.overlap * SAMPLE_RATE) : 0;
+    const offset = Math.max(0, finalizedUntil - overlap - start);
+    audio = audio.subarray(offset);
+    finalizedUntil = end;
+    const previous = overlap ? lastForcedText : '';
+    lastForcedText = '';
     busy = true;
     try {
-      const end = start + audio.length;
-      audio = audio.subarray(Math.max(0, finalizedUntil - start));
-      finalizedUntil = Math.max(finalizedUntil, end);
       if (audio.length < SAMPLE_RATE * 0.3) return;
-      const text = decode(audio);
+      const text = trimOverlap(previous, decode(audio));
       if (!text) return;
+      lastForcedText = forced && vadConfig.overlap ? text : '';
       finals++;
       const id = segId++;
       emit({
         type: 'final',
         id,
         text,
-        t: +(totalSamples / SAMPLE_RATE).toFixed(2),
+        t: +(end / SAMPLE_RATE).toFixed(2),
+        t_start: +((start + offset) / SAMPLE_RATE).toFixed(2),
+        forced,
         decode_ms: Math.round(lastDecodeMs),
       });
       lastText = text;
       scheduleTranslation(id, text);
     } finally {
       busy = false;
-      resetSegment();
+      resetSegment(end);
     }
   }
 
-  function feed(samples) {
-    if (!ready || !started) return;
-    append(samples);
-    feedVad(samples);
-    if (busy) return;
-
+  function advanceVad(end) {
+    while (!vad.isEmpty()) {
+      const seg = vad.front();
+      vad.pop();
+      finishSegment(seg.samples, seg.start);
+    }
     const inSpeech = vad.isDetected();
     if (inSpeech && !speaking) {
-      speaking = true;
-      segStart = Math.max(0, totalSamples - Math.round(0.35 * SAMPLE_RATE));
+      segStart = Math.max(finalizedUntil, end - Math.round(0.35 * SAMPLE_RATE));
       lastPartialAt = 0;
       emit({ type: 'speech_start', id: segId });
     } else if (!inSpeech && speaking) {
-      speaking = false;
-      if (!vad.isEmpty()) {
-        const seg = vad.front();
-        const audio = seg.samples;
-        vad.pop();
-        finishSegment(audio, seg.start);
-      } else {
-        resetSegment();
-      }
-      return;
+      lastForcedText = '';
+      resetSegment(end);
     }
+    speaking = inSpeech;
+    const boundary = segStart + Math.round(vadConfig.maxSegment * SAMPLE_RATE);
+    if (speaking && end >= boundary) {
+      const start = Math.max(0, segStart - (lastForcedText ? Math.round(vadConfig.overlap * SAMPLE_RATE) : 0));
+      finishSegment(slice(start, boundary), start, true);
+    }
+  }
 
+  function feed(samples, suppressPreview = false) {
+    if (!ready || !started || busy || !samples.length) return;
+    append(samples);
+    const end = feedVad(samples);
     if (!speaking) return;
-    const dur = (totalSamples - segStart) / SAMPLE_RATE;
-    if (dur >= MAX_SEGMENT_SEC) {
-      finishSegment(slice(segStart, totalSamples), segStart);
-      return;
-    }
+    const dur = (end - segStart) / SAMPLE_RATE;
     const now = Date.now();
     if (dur >= MIN_PARTIAL_SEC && now - lastPartialAt >= partialInterval) {
       lastPartialAt = now;
-      const from = Math.max(segStart, totalSamples - MAX_WINDOW_SEC * SAMPLE_RATE);
-      const audio = slice(from, totalSamples);
+      if (suppressPreview) { previewBacklogSkips++; return; }
+      const from = Math.max(segStart, end - MAX_WINDOW_SEC * SAMPLE_RATE);
+      const audio = slice(from, end);
       busy = true;
       try {
         const text = decode(audio);
@@ -619,7 +652,7 @@
           const stable = lastHyp ? commonPrefix(lastHyp, text) : text;
           lastHyp = text;
           lastText = text;
-          emit({ type: 'partial', id: segId, text, stable, t: +(totalSamples / SAMPLE_RATE).toFixed(2) });
+          emit({ type: 'partial', id: segId, text, stable, t: +(end / SAMPLE_RATE).toFixed(2) });
           // ASR previews can still change. Submit only the finalized segment
           // to avoid translating the beginning of one sentence twice.
         }
@@ -678,6 +711,7 @@
       if (epoch === generation) emit({ type: 'progress', message });
     };
     try {
+      vadConfig = vadSettings(config.vad);
       await abortable(loadDomain(), signal);
       signal.throwIfAborted();
       setConfig({ target: config.target || 'zh', apiKey: config.apiKey || '', model: config.model || 'deepseek-chat',
@@ -718,7 +752,7 @@
       sileroVad: {
         model: '/silero_vad.onnx',
         threshold: 0.5,
-        minSilenceDuration: 0.4,
+        minSilenceDuration: vadConfig.minSilence,
         minSpeechDuration: 0.25,
         maxSpeechDuration: 20,
         windowSize: 512,
@@ -751,6 +785,8 @@
       rtf: decodeCount ? +(decodeMsTotal / 1000 / Math.max(totalSamples / SAMPLE_RATE, 0.01)).toFixed(3) : 0,
       finals,
       asr_packs: asrPacks?.slice() ?? [],
+      vad: { ...vadConfig },
+      preview_backlog_skips: previewBacklogSkips,
       translations: translateCount,
       translation: translationStats(),
       avg_translate_ms: translateCount ? Math.round(translateMsTotal / translateCount) : 0,
@@ -768,8 +804,11 @@
     chunks.length = 0;
     vadPending = new Float32Array(0);
     totalSamples = segStart = segId = lastPartialAt = finalizedUntil = 0;
+    lastForcedText = '';
+    vadConfig = DEFAULT_VAD;
     speaking = busy = false;
     partialInterval = PARTIAL_INTERVAL;
+    previewBacklogSkips = 0;
     decodeMsTotal = decodeCount = finals = translateCount = translateMsTotal = lastDecodeMs = 0;
     recognizer?.free();
     vad?.free();

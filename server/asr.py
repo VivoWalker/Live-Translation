@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
@@ -189,6 +190,16 @@ def create_recognizer(engine: str = "sensevoice", model_dir: str | None = None,
                             asr_domain=asr_domain, asr_terms=asr_terms)
 
 
+@dataclass(frozen=True)
+class SpeechSpan:
+    start: int
+    samples: np.ndarray
+
+    @property
+    def end(self) -> int:
+        return self.start + len(self.samples)
+
+
 class SileroVad:
     """Silero VAD from sherpa-onnx, used to cut utterances out of a stream."""
 
@@ -208,6 +219,9 @@ class SileroVad:
         self._vad.accept_waveform(audio)
 
     def pop_segments(self, since: int = 0) -> list[np.ndarray]:
+        return [span.samples for span in self.pop_spans(since)]
+
+    def pop_spans(self, since: int = 0) -> list[SpeechSpan]:
         out = []
         while not self._vad.empty():
             seg = self._vad.front
@@ -216,7 +230,7 @@ class SileroVad:
             # detector still returns the whole utterance when silence arrives.
             offset = max(0, since - seg.start)
             if offset < len(samples):
-                out.append(samples[offset:])
+                out.append(SpeechSpan(seg.start + offset, samples[offset:]))
             self._vad.pop()
         return out
 

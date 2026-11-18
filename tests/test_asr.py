@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 
-from server.asr import (SAMPLE_RATE, WhisperRecognizer, create_recognizer,
+from server.asr import (SAMPLE_RATE, SpeechSpan, WhisperRecognizer, create_recognizer,
                         resolve_model_dir, resolve_whisper_model)
 from server.streaming import StreamSession
 from server.translate import MockTranslator, TranslationPipeline
@@ -136,7 +136,7 @@ class PreviewTests(unittest.IsolatedAsyncioTestCase):
             await session._step()
         session._emit_partial.assert_not_awaited()
         session.vad.in_speech = False
-        session.vad.pop_segments.return_value = [np.zeros(SAMPLE_RATE * 3, dtype=np.float32)]
+        session.vad.pop_spans.return_value = [SpeechSpan(0, np.zeros(SAMPLE_RATE * 3, dtype=np.float32))]
         session._finalize = AsyncMock()
         await session._step()
         session._finalize.assert_awaited_once()

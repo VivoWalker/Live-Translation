@@ -9,8 +9,8 @@ import numpy as np
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from server.asr import SAMPLE_RATE, SileroVad
-from server.streaming import StreamSession
+from server.asr import SAMPLE_RATE, SileroVad, SpeechSpan
+from server.streaming import SessionConfig, StreamSession, VadSettings
 from server.translate import DeepSeekTranslator, Translation, TranslationPipeline
 
 
@@ -69,7 +69,7 @@ class TranslationTimingTests(unittest.IsolatedAsyncioTestCase):
         detector = MagicMock()
         detector.is_speech_detected.return_value = True
         detector.front = SimpleNamespace(start=0, samples=np.concatenate([first, tail]))
-        detector.empty.side_effect = [False, True]
+        detector.empty.return_value = True
         vad = SileroVad.__new__(SileroVad)
         vad._vad = detector
         asr = SimpleNamespace(transcribe=MagicMock(return_value='本段字幕'))
@@ -85,6 +85,7 @@ class TranslationTimingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(asr.transcribe.call_args.args[0]), 12 * SAMPLE_RATE)
         session._append(tail)
         detector.is_speech_detected.return_value = False
+        detector.empty.side_effect = [False, True]
         await session._step()
         await session._translations[1]
         self.assertEqual(asr.transcribe.call_count, 2)
@@ -99,6 +100,33 @@ class TranslationTimingTests(unittest.IsolatedAsyncioTestCase):
         vad._vad = detector
         self.assertEqual(vad.pop_segments(since=32000), [])
         detector.pop.assert_called_once()
+
+    async def test_multiple_vad_segments_and_configured_overlap(self):
+        first = np.zeros(8 * SAMPLE_RATE, dtype=np.float32)
+        tail = np.zeros(SAMPLE_RATE, dtype=np.float32)
+        asr = SimpleNamespace(transcribe=MagicMock(side_effect=["この台詞は次の続き", "次の続きです", "別の句"]))
+        translator = SimpleNamespace(translate=AsyncMock(return_value=Translation("译文", "mock", 0)))
+        events = []
+        with patch("server.streaming.SileroVad") as factory:
+            session = StreamSession(asr, translator, events.append, SessionConfig(vad=VadSettings(.6, 8, .2)))
+        self.addAsyncCleanup(session.close)
+        factory.assert_called_once_with(min_silence=.6)
+        session._speech = session.vad.in_speech = True
+        session.vad.pop_spans.return_value = []
+        session._append(first)
+        await session._step()
+        session.vad.in_speech = False
+        overlap = int(.2 * SAMPLE_RATE)
+        session.vad.pop_spans.return_value = [
+            SpeechSpan(len(first) - overlap, np.zeros(len(tail) + overlap, dtype=np.float32)),
+            SpeechSpan(len(first) + len(tail), tail),
+        ]
+        session._append(np.concatenate([tail, tail]))
+        await session._step()
+        self.assertEqual([event["text"] for event in events if event["type"] == "final"],
+                         ["この台詞は次の続き", "です", "別の句"])
+        self.assertEqual([event["t"] for event in events if event["type"] == "final"], [8, 9, 10])
+        session.vad.pop_spans.assert_called_with(since=len(first) - overlap)
 
     async def test_slow_first_translation_still_arrives_and_context_follows_finals(self):
         entered, release = asyncio.Event(), asyncio.Event()

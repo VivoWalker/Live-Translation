@@ -2,6 +2,7 @@
 'use strict';
 let active = null;
 let generation = 0;
+const SOCKET_WARN_BYTES = 64 * 1024, SOCKET_LIMIT_BYTES = 128 * 1024;
 const current = capture => active === capture && !capture.cancelled;
 function report(capture, phase, message) {
   if (current(capture)) chrome.runtime.sendMessage({ type: 'jls:state', sessionId: capture.sessionId, phase, message }).catch(() => {});
@@ -11,6 +12,11 @@ function send(capture, event) {
 }
 function check(capture) {
   if (!current(capture)) throw new DOMException('采集已取消', 'AbortError');
+}
+function failCapture(capture, message) {
+  if (!current(capture)) return;
+  report(capture, 'error', message);
+  stopInternal(capture.sessionId);
 }
 async function dispose(capture) {
   if (!capture || capture.cancelled) return;
@@ -59,15 +65,16 @@ function connect(capture, url, target, token) {
         report(capture, 'connected', '已连接字幕服务（' + msg.asr + ' / ' + msg.translator + '）');
         resolve();
       }
+      if (msg.type === 'stats') msg.client_buffered_bytes = sock.bufferedAmount || 0;
       send(capture, msg);
     };
     sock.onerror = () => fail(new Error('无法连接字幕服务'));
-    sock.onclose = () => {
-      fail(new Error('字幕服务连接已关闭，请检查访问令牌'));
-      if (current(capture)) {
-        report(capture, 'error', '字幕服务已断开，请检查访问令牌');
-        stopInternal(capture.sessionId);
-      }
+    sock.onclose = event => {
+      const message = event?.code === 1013 ? '字幕服务积压，请重新开始字幕'
+        : event?.code === 1011 ? '字幕服务处理失败，请检查本地模型'
+          : event?.code === 1008 ? '字幕服务拒绝连接，请检查访问令牌或请求限制' : '字幕服务已断开';
+      fail(new Error(message));
+      failCapture(capture, message);
     };
   });
 }
@@ -106,14 +113,11 @@ async function start(msg) {
     await capture.ctx.audioWorklet.addModule(chrome.runtime.getURL('pcm-worklet.js')); check(capture);
     if (capture.ctx.state === 'suspended') { await capture.ctx.resume(); check(capture); }
     capture.source = capture.ctx.createMediaStreamSource(capture.stream);
-    capture.node = new AudioWorkletNode(capture.ctx, 'pcm-tap', { numberOfInputs: 1, numberOfOutputs: 0, channelCount: 1, channelCountMode: 'explicit' });
-    capture.source.connect(capture.node);
+    capture.node = new AudioWorkletNode(capture.ctx, 'pcm-tap', { numberOfInputs: 1, numberOfOutputs: 0,
+      channelCount: 1, channelCountMode: 'explicit', processorOptions: { maxPendingBlocks: 20 } });
     if (msg.engine === 'server') {
       await connect(capture, msg.serverUrl || 'ws://127.0.0.1:8765/ws', msg.target || 'zh', msg.serverToken || '');
       check(capture);
-      capture.node.port.onmessage = e => {
-        if (current(capture) && capture.ws?.readyState === 1) capture.ws.send(e.data);
-      };
     } else {
       capture.engineStarted = true;
       await Promise.race([JLSEngine.init({ target: msg.target || 'zh', apiKey: msg.apiKey || '', asrPacks: msg.asrPacks ?? msg.asrDomain, onEvent: event => {
@@ -122,8 +126,35 @@ async function start(msg) {
         else send(capture, event);
       } }), capture.cancelledPromise]);
       check(capture);
-      capture.node.port.onmessage = e => { if (current(capture)) JLSEngine.feed(e.data); };
     }
+    const audioStart = capture.ctx.currentTime;
+    let audioSeconds = 0, congested = false;
+    capture.node.port.onmessage = ({ data }) => {
+      if (!current(capture)) return;
+      if (data.overrun) { failCapture(capture, '音频处理积压，请重新开始字幕'); return; }
+      try {
+        if (capture.ws?.readyState === 1) {
+          const buffered = (capture.ws.bufferedAmount || 0) + data.byteLength;
+          if (buffered > SOCKET_LIMIT_BYTES) {
+            failCapture(capture, '音频发送缓冲区已满，请检查本地服务并重新开始字幕');
+            return;
+          }
+          const warning = buffered > SOCKET_WARN_BYTES;
+          if (warning !== congested) {
+            congested = warning;
+            report(capture, warning ? 'degraded' : 'capturing', warning ? '音频发送积压' : '正在接收页面声音');
+          }
+          capture.ws.send(data);
+        } else if (capture.engineStarted) {
+          audioSeconds += data.length / 16000;
+          JLSEngine.feed(data, capture.ctx.currentTime - audioStart - audioSeconds > .3);
+        }
+        capture.node.port.postMessage('consumed');
+      } catch {
+        failCapture(capture, '音频处理失败，请重新开始字幕');
+      }
+    };
+    capture.source.connect(capture.node);
     report(capture, 'capturing', '正在接收页面声音');
     capture.statsTimer = setInterval(() => {
       if (!current(capture)) return;

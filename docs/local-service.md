@@ -124,3 +124,7 @@ python tools/test_asr.py testdata/ja_nanami.mp3 --asr whisper --threads 2
 ```
 
 Whisper 的预览至少等待 2 秒语音，间隔至少 2 秒；解码慢时进一步降低预览频率。最终字幕仍由句尾分段触发，较慢的 CPU 或多个音源可能产生积压。
+
+## 语音分段参数
+
+`--vad-min-silence`、`--vad-max-segment` 和 `--vad-overlap` 的单位均为秒，对应配置字段 `vad_min_silence`、`vad_max_segment`、`vad_overlap`。默认分别为 0.4、12、0。可在同一批音频上比较 0.4 / 0.6 / 0.8 秒停顿和 8 / 12 / 16 秒上限。重叠为可选实验，允许 0–0.3 秒，在强制切分后的下一段复用少量边界音频，移除双方一致的短前后缀。真实重复的台词可能受影响，使用默认配置可关闭此行为。
