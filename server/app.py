@@ -51,6 +51,7 @@ from server.security import (  # noqa: E402
 from server.ws_events import ClientEvents  # noqa: E402
 
 WEB_DIR = ROOT / "web"
+SUBTITLE_SEND_TIMEOUT = 2
 
 
 class AppState:
@@ -172,7 +173,10 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
         async def writer():
             try:
                 while (event := await out.get()) is not None:
-                    async with asyncio.timeout(2):
+                    budget = out.send_budget(SUBTITLE_SEND_TIMEOUT)
+                    if budget <= 0:
+                        break
+                    async with asyncio.timeout(budget):
                         await ws.send_json(event)
             except (TimeoutError, ClientConnectionError, OSError, RuntimeError):
                 out.fail(1013, b"Subtitle client could not keep up")
@@ -189,6 +193,8 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
         control_budget = RateBudget(20, 40)
         message_budget = RateBudget(50, 100)
         async for msg in ws:
+            if out.failure:
+                break
             try:
                 if msg.type in (WSMsgType.BINARY, WSMsgType.TEXT) and not message_budget.consume(1):
                     raise ValueError("Message rate limit exceeded")
@@ -213,13 +219,15 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                         request_id = data.get("request_id")
                         if "request_id" in data and (type(request_id) is not int or not 0 <= request_id < 2**31):
                             raise ValueError("Invalid configuration request ID")
+                        turns = data.get("context_turns", cfg.context_turns)
+                        if type(turns) is not int or turns not in CONTEXT_WINDOWS:
+                            raise ValueError("Invalid translation context size")
                         domain = (state.episodes.resolve(data["domain"], title=data.get("page_title", ""),
                                                          packs=data.get("packs")) if "domain" in data else None)
                         await session.set_target(target)
                         if domain is not None:
                             session.set_domain(domain)
-                        if "context_turns" in data:
-                            session.set_context_turns(data["context_turns"])
+                        session.set_context_turns(turns)
                         if "agent" in data:
                             session.set_agent(state.new_agent() if data["agent"] else None)
                         out.put({"type": "config", "ok": True, "target": target,
