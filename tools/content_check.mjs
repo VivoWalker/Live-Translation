@@ -289,6 +289,14 @@ try {
   await call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
   await call('Page.navigate', { url: PAGE });
   await sleep(300); await inject();
+  await evaluate(`send({type:'final',id:90,text:'最初の句。'});send({type:'final',id:91,text:'次の句。'});
+    send({type:'translation',id:91,text:'第二句',final:true});send({type:'partial',id:90,text:'过期预览'});
+    send({type:'translation',id:90,text:'第一句',final:true});`);
+  assert.deepEqual(await evaluate(`[90,91].map(id=>cap('.rows .row[data-id="'+id+'"] .zh')?.textContent)`),
+    ['第一句', '第二句']);
+  assert.equal(await evaluate(`cap('.wrap').textContent.includes('过期预览')`), false);
+  await evaluate(`window.__jlsListener({type:'jls:clear'},{},()=>{})`);
+  checks.push('rapid finals retain their rows when translations return in reverse order');
   await evaluate(`send({type:'partial',id:100,text:'今日は東京の天気について'});window.__sourceFont=getComputedStyle(cap('.live .ja')).fontSize;send({type:'final',id:100,text:'今日は東京の天気についてお話しします。'});
     window.__sourceRow=cap('.rows .row[data-id="100"]');window.__sourceJa=__sourceRow?.querySelector('.ja');
     send({type:'speech_start',id:101});send({type:'partial',id:101,text:'午後から雨が'});`);

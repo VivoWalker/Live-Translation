@@ -1,15 +1,19 @@
 import asyncio
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import aiohttp
+import numpy as np
 from aiohttp.test_utils import TestClient, TestServer
 
 from server.app import AppState, build_app
+from server.asr import Capabilities
 from server.streaming import AudioBacklogError, Stats
 from server.translate import MockTranslator, TranslationPipeline
 from server.ws_events import ClientEvents
+from tools.benchmark_mock import FixtureVad
 
 
 class OutputTests(unittest.IsolatedAsyncioTestCase):
@@ -124,3 +128,52 @@ class OutputTests(unittest.IsolatedAsyncioTestCase):
                     await ws.send_json({"type": "ping"})
                     self.assertEqual((await ws.receive_json())["type"], "pong")
         self.assertEqual((state.sessions, len(state.sockets)), (0, 0))
+
+    async def test_slow_primary_audio_overflow_closes_then_another_session_recovers(self):
+        entered, release = asyncio.Event(), threading.Event()
+        loop = asyncio.get_running_loop()
+        self.addCleanup(release.set)
+
+        def transcribe(_):
+            loop.call_soon_threadsafe(entered.set)
+            release.wait(3)
+            return "日語字幕。"
+
+        asr = SimpleNamespace(name="slow", transcribe=transcribe, capabilities=Capabilities(partial_transcription=False))
+        token = "queue-test-token-" + "x" * 30
+        # A bounded test buffer makes the failure deterministic without hitting the audio rate limit.
+        state = AppState(asr, TranslationPipeline(MockTranslator()), access_token=token)
+        speech = np.full(1600, .1, dtype="<f4").tobytes()
+        silence = bytes(len(speech))
+
+        async def start(client):
+            ws = await client.ws_connect("/ws")
+            await ws.send_json({"type": "auth", "token": token})
+            self.assertEqual((await ws.receive_json())["type"], "ready")
+            return ws
+
+        async def utter(ws):
+            for frame in (speech,) * 5 + (silence,) * 3:
+                await ws.send_bytes(frame)
+                await asyncio.sleep(.01)
+
+        with patch("server.streaming.SileroVad", FixtureVad), patch("server.streaming.MAX_BUFFERED_BYTES", 3 * len(speech)):
+            async with TestClient(TestServer(build_app(state))) as client:
+                async with await start(client) as ws:
+                    await utter(ws)
+                    await asyncio.wait_for(entered.wait(), 1)
+                    for _ in range(4):
+                        await ws.send_bytes(silence)
+                    while (event := await ws.receive(timeout=2)).type == aiohttp.WSMsgType.TEXT:
+                        self.assertNotEqual(event.json()["type"], "final")
+                    self.assertEqual((event.type, event.data), (aiohttp.WSMsgType.CLOSE, 1013))
+                    self.assertIn("audio backlog", event.extra)
+                    self.assertFalse(state.decoder.idle)
+                release.set()
+                async with await start(client) as ws:
+                    await utter(ws)
+                    events = []
+                    while not any(event["type"] == "translation" for event in events):
+                        events.append(await ws.receive_json(timeout=2))
+                    self.assertEqual([(event["type"], event["id"]) for event in events],
+                                     [("speech_start", 0), ("final", 0), ("translation", 0)])

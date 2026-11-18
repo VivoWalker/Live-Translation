@@ -20,6 +20,7 @@ const getArg = (name, def) => {
 const PAGE_URL = getArg('url', 'http://127.0.0.1:8765/?autostart=file');
 const SECONDS = Number(getArg('seconds', '16'));
 const SWITCH_LANGUAGE = argv.includes('--switch-language');
+const RESTART = argv.includes('--restart');
 const PORT = Number(getArg('port', '9337'));
 const CHROME = process.env.JLS_CHROME || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 
@@ -72,6 +73,7 @@ function connect(wsUrl) {
       if (msg.id && pending.has(msg.id)) {
         const p = pending.get(msg.id);
         pending.delete(msg.id);
+        clearTimeout(p.timer);
         if (msg.error) p.reject(new Error(JSON.stringify(msg.error).slice(0, 300)));
         else p.resolve(msg.result);
       } else if (msg.method === 'Runtime.consoleAPICalled') {
@@ -87,16 +89,14 @@ function connect(wsUrl) {
 function call(ws, method, params = {}, sessionId) {
   const id = ++msgId;
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
     const payload = { id, method, params };
     if (sessionId) payload.sessionId = sessionId;
-    ws.send(JSON.stringify(payload));
-    setTimeout(() => {
-      if (pending.has(id)) {
-        pending.delete(id);
-        reject(new Error('timeout: ' + method));
-      }
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error('timeout: ' + method));
     }, 20000);
+    pending.set(id, { resolve, reject, timer });
+    ws.send(JSON.stringify(payload));
   });
 }
 
@@ -182,8 +182,23 @@ try {
     for (const l of logs.slice(-20)) console.log('  ' + l);
   }
   const stopped = await evaluate(ws, sessionId, 'window.__jls.stop(); !window.__jls.state.capturing');
+  let restarted = !RESTART;
+  if (RESTART && stopped) {
+    const clear = await evaluate(ws, sessionId, '!(window.__jls.captionText.ja || window.__jls.captionText.zh)');
+    if (clear) {
+      await evaluate(ws, sessionId, "void window.__jls.start('file')");
+      const expected = SWITCH_LANGUAGE ? '[en] ' : '[zh] ';
+      for (let attempt = 0; attempt < 30 && !restarted; attempt++) {
+        await sleep(300);
+        restarted = await evaluate(ws, sessionId,
+          `window.__jls.state.capturing && !!window.__jls.captionText.zh?.startsWith(${JSON.stringify(expected)})`);
+      }
+    }
+    await evaluate(ws, sessionId, 'window.__jls.stop()');
+    console.log('fresh session received subtitles:', restarted);
+  }
   console.log(`\ncaption updates observed: ${seen.length}, translated: ${translated}, stopped: ${stopped}`);
-  const pass = seen.length >= 2 && translated && switched && stopped;
+  const pass = seen.length >= 2 && translated && switched && stopped && restarted;
   console.log(pass ? 'RESULT: PASS' : 'RESULT: FAIL');
   if (!pass) process.exitCode = 1;
   ws.close();
@@ -191,6 +206,7 @@ try {
   console.error('RESULT: FAIL', e.message);
   process.exitCode = 1;
 } finally {
+  for (const item of pending.values()) clearTimeout(item.timer);
   try {
     child.kill();
   } catch {}

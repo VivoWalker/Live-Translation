@@ -162,7 +162,7 @@ async def wire_check(browser=False):
         if browser:
             url = str(server.make_url("/?autostart=file"))
             child = await asyncio.create_subprocess_exec(
-                "node", "tools/browser_check.mjs", "--url", url, "--seconds", "10", "--switch-language",
+                "node", "tools/browser_check.mjs", "--url", url, "--seconds", "10", "--switch-language", "--restart",
                 cwd=ROOT, env={**os.environ, "JLSUBS_ACCESS_TOKEN": token})
             try:
                 async with asyncio.timeout(65):

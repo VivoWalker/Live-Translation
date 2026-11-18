@@ -535,13 +535,18 @@ test('large model storage has the extension permission needed to avoid eviction'
 
 test('background forwards mode/keys and refuses stale or spoofed events', async () => {
   let listener;
+  let blockedStop;
   const sent = [], painted = [], values = {};
   const sandbox = vm.createContext({
     console, crypto: webcrypto, setTimeout,
     chrome: {
-      runtime: { id: extensionId, getURL: extensionURL, getContexts: async () => [{}], onMessage: { addListener(fn) { listener = fn; } }, sendMessage: async m => { sent.push(m); return { ok: true }; } },
+      runtime: { id: extensionId, getURL: extensionURL, getContexts: async () => [{}], onMessage: { addListener(fn) { listener = fn; } }, sendMessage: async m => {
+        sent.push(m);
+        if (m.type === 'jls:offscreen-stop' && blockedStop) await blockedStop.promise;
+        return { ok: true };
+      } },
       storage: { local: { setAccessLevel: async () => {}, get: async key => ({ [key]: values[key] }), set: async entries => Object.assign(values, entries) }, session: { get: async key => ({ [key]: values[key] }), set: async entries => Object.assign(values, entries) } },
-      tabs: { sendMessage: async (id, m) => { painted.push({ id, ...m }); return { ok: true }; }, query: async () => [], onRemoved: { addListener() {} } },
+      tabs: { sendMessage: async (id, m) => { painted.push({ id, ...m }); return { ok: true }; }, query: async () => [{ id: 2 }], onRemoved: { addListener() {} } },
       action: { setBadgeText() {}, setBadgeBackgroundColor() {} },
     },
   });
@@ -580,6 +585,16 @@ test('background forwards mode/keys and refuses stale or spoofed events', async 
   await dispatch(listener, { type: 'jls:event', sessionId: last.sessionId, event: { text: 'after-stop' } }, 'offscreen.html');
   await tick();
   assert.equal(painted.length, 0);
+  await dispatch(listener, { ...message, tabId: 2 }, 'popup.html');
+  blockedStop = deferred();
+  const stopping = dispatch(listener, { type: 'jls:stop' }, 'popup.html');
+  await tick();
+  await dispatch(listener, { ...message, tabId: 2 }, 'popup.html');
+  painted.length = 0;
+  blockedStop.resolve();
+  await stopping;
+  assert.equal(painted.some(m => m.type === 'jls:clear'), false);
+  assert.equal((await dispatch(listener, { type: 'jls:query' }, 'popup.html')).running, true);
 });
 
 test('browser-mode popup starts without fetching a local service', async () => {
