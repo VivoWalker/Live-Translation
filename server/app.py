@@ -37,6 +37,7 @@ sys.path.insert(0, str(ROOT))
 from server.asr import BackendUnavailable, Capabilities, PROVIDERS, Recognizer  # noqa: E402
 from server.asr_router import DecodeScheduler, select_recognizer  # noqa: E402
 from server.asr_domain import PACKS, PROFILES, normalize_packs  # noqa: E402
+from server.episodes import EpisodeCatalog  # noqa: E402
 from server.streaming import AudioBacklogError, SessionConfig, StreamSession, VadSettings  # noqa: E402
 from server.translate import TranslationPipeline, create_translator  # noqa: E402
 from server.security import (  # noqa: E402
@@ -52,13 +53,14 @@ class AppState:
     def __init__(
         self, asr: Recognizer, translator: TranslationPipeline, *,
         access_token: str | None = None, allowed_hosts: set[str] | None = None, vad: VadSettings = VadSettings(),
-        fallback_from: str | None = None,
+        fallback_from: str | None = None, episodes: EpisodeCatalog | None = None,
     ):
         self.asr = asr
         self.translator = translator
         self.vad = vad
         self.decoder = DecodeScheduler()
         self.fallback_from = fallback_from
+        self.episodes = episodes or EpisodeCatalog()
         self.capabilities = asdict(getattr(asr, "capabilities", Capabilities()))
         self.access_token = access_token or secrets.token_urlsafe(32)
         if len(self.access_token) < 32 or not self.access_token.isascii():
@@ -176,8 +178,13 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                         target = data.get("target", cfg.target_lang)
                         if target not in ("zh", "en"):
                             raise ValueError("Unsupported target language")
+                        domain = (state.episodes.resolve(data["domain"], title=data.get("page_title", ""),
+                                                         packs=data.get("packs")) if "domain" in data else None)
                         await session.set_target(target)
-                        out.put({"type": "config", "ok": True, "target": target})
+                        if domain is not None:
+                            session.set_domain(domain)
+                        out.put({"type": "config", "ok": True, "target": target,
+                                 **({"domain": domain.public()} if domain else {})})
                     elif kind == "ping":
                         out.put({"type": "pong", "t": time.time()})
                     elif kind == "stats":
@@ -312,6 +319,7 @@ def main() -> int:
     lexicon.add_argument("--asr-packs", choices=PACKS, nargs="*", help="Enable named ASR word packs; no names disables all packs")
     lexicon.add_argument("--asr-domain", choices=PROFILES, help="Legacy ASR lexicon profile")
     ap.add_argument("--asr-terms", default=cfg.get("asr_terms"), help="Custom ASR lexicon JSON, replaces built-in terms")
+    ap.add_argument("--episode-catalog", default=cfg.get("episode_catalog"), help="Local episode metadata JSON")
     ap.add_argument("--dev-assets", action="store_true", help="Expose non-secret development test pages")
     ap.add_argument("--allow-host", action="append", default=[], help="Additional trusted HTTP hostname (no scheme or port)")
     args = ap.parse_args()
@@ -324,6 +332,7 @@ def main() -> int:
     api_key = os.environ.get("DEEPSEEK_API_KEY") or cfg.get("deepseek_api_key")
     try:
         vad = VadSettings(args.vad_min_silence, args.vad_max_segment, args.vad_overlap)
+        episodes = EpisodeCatalog(args.episode_catalog)
         asr, fallback_from = select_recognizer(args.asr, model_dir=args.model_dir, language="ja",
                                                num_threads=args.threads, asr_domain=selection, asr_terms=args.asr_terms,
                                                device=args.asr_device, precision=args.asr_precision,
@@ -332,7 +341,8 @@ def main() -> int:
         ap.error(str(exc))
     translator = TranslationPipeline(create_translator(args.translator, api_key))
     state = AppState(asr, translator, access_token=os.environ.get("JLSUBS_ACCESS_TOKEN") or cfg.get("access_token"),
-                     allowed_hosts=LOCAL_HOSTS | set(args.allow_host), vad=vad, fallback_from=fallback_from)
+                     allowed_hosts=LOCAL_HOSTS | set(args.allow_host), vad=vad, fallback_from=fallback_from,
+                     episodes=episodes)
     active_packs = ("custom" if selection != "off" else "off") if args.asr_terms else ",".join(normalize_packs(selection)) or "off"
     print(f"[jls] asr={asr.name} threads={args.threads} asr_packs={active_packs} translator={translator.engine}")
     if fallback_from:

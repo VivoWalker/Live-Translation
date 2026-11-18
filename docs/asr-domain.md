@@ -1,5 +1,13 @@
 # 日语领域识别与词表
 
+## 节目上下文
+
+手动模式继续使用原有词包选择。自动模式对标签页标题做 Unicode 规范化，以匹配最长的策划或节目名称。未匹配时保持原文。浏览器模式使用包内节目目录，本地服务可通过 `--episode-catalog` 使用自有目录。只在启动对应模式时读取标题和选择词包。
+
+目录格式见 [episodes.json](../extension/asr-terms/episodes.json)。每条节目记录包含 `franchise`、可选 `episode`、词包、标题匹配字串和来源。术语可保存读音、分类、优先级、核验状态和独立来源。仅明确标为 `verified: true` 的词条可参与纠错或模型提示。已有词包的同句语境约束继续生效。程序不会由网页提供的标题推导或抓取新词条。
+
+Python recognizer 返回原始识别及每处替换的范围和来源。浏览器词表的 `explain(text)` 返回同类记录。字幕的日语规范名与后续翻译词表独立。
+
 浏览器的 SenseVoice 与 Python 的 SenseVoice、Whisper 共用[日语专名词库](../extension/asr-terms)。识别文本规范化后先在本地校正专名，再显示日语字幕或翻译最终分段。
 
 当前 sherpa-onnx 的这两种离线模型接入使用 `greedy_search`。已检查安装版本的 `from_sense_voice` / `from_whisper` 及 WASM 绑定；这里没有为它们配置 transducer 的 hotwords 参数，也没有伪造 Whisper initial prompt 支持。本次实现是可关闭的文本领域适配，没有重新训练模型权重，不能修复没听到的音节、重叠语音或被背景音乐盖住的内容。

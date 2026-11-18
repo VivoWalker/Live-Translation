@@ -15,8 +15,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .asr import Capabilities, SAMPLE_RATE, SileroVad, Recognizer
+from .asr import Capabilities, Recognition, RecognitionContext, SAMPLE_RATE, SileroVad, Recognizer
 from .asr_router import DecodeScheduler
+from .episodes import DomainSelection
 from .text import normalize_ja, stable_prefix, trim_overlap
 from .translate import TranslationPipeline
 from .security import MAX_BUFFERED_BYTES, MAX_FRAME_BYTES
@@ -51,6 +52,7 @@ class SessionConfig:
     target_lang: str = "zh"
     source_lang: str = "ja"
     vad: VadSettings = VadSettings()
+    domain: DomainSelection | None = None
 
 
 @dataclass
@@ -229,28 +231,45 @@ class StreamSession:
         await self._maybe_preview(start + consumed)
 
     # ---------------------------------------------------------------- ASR/MT
-    async def _decode(self, audio: np.ndarray, *, partial: bool = False) -> str:
+    def _recognition_context(self) -> RecognitionContext:
+        domain = self.cfg.domain
+        return RecognitionContext(self.previous_final_japanese,
+                                  domain.prompt_terms if domain else (), domain.corrector if domain else None)
+
+    async def _decode(self, audio: np.ndarray, *, partial: bool = False) -> Recognition:
         t0 = time.perf_counter()
         try:
-            text = await self.decoder.run(self.asr.transcribe, audio, optional=partial)
-            if text is None:
+            recognize = getattr(self.asr, "recognize", None)
+            if recognize:
+                result = await self.decoder.run(recognize, audio, self._recognition_context(), optional=partial)
+            else:
+                result = await self.decoder.run(self.asr.transcribe, audio, optional=partial)
+            if result is None:
                 self.stats.preview_backlog_skips += 1
-                return ""
+                return Recognition("", "")
         except Exception:
             self.stats.decode_failures += 1
             self._emit({"type": "error", "scope": "asr", "code": "asr_decode_failed",
                         "message": "语音识别失败"})
-            return ""
+            return Recognition("", "")
         elapsed = (time.perf_counter() - t0) * 1000
         self._last_decode_ms = elapsed
         self.stats.decodes += 1
         self.stats.decode_ms += elapsed
-        return normalize_ja(text)
+        return result if isinstance(result, Recognition) else Recognition(normalize_ja(result), result)
 
     async def set_target(self, target: str) -> None:
         if target == self.cfg.target_lang:
             return
         self.cfg.target_lang = target
+        self._reset_translations()
+
+    def set_domain(self, selection: DomainSelection) -> None:
+        if self.cfg.domain != selection:
+            self.cfg.domain = selection
+            self._reset_translations()
+
+    def _reset_translations(self) -> None:
         self.translation_epoch += 1
         self.previous_final_japanese = ""
         self.last_translated_segment = None
@@ -327,7 +346,7 @@ class StreamSession:
         audio = self._slice(start, end)
         if len(audio) < SAMPLE_RATE * self.asr.min_partial_speech:
             return
-        text = await self._decode(audio, partial=True)
+        text = (await self._decode(audio, partial=True)).text
         if not text:
             return
         stable = stable_prefix(self._last_hyp, text) if self._last_hyp else text
@@ -346,7 +365,7 @@ class StreamSession:
         self._last_forced_text = ""
         if len(audio) < SAMPLE_RATE * 0.3:
             return
-        text = await self._decode(audio)
+        text = (await self._decode(audio)).text
         if not text:
             return
         text = trim_overlap(overlap_text, text)

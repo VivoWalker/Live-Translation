@@ -85,19 +85,32 @@
   }
   let translationState = freshTranslationState();
   let asrPacks = null, selectDomain = null, domainCorrector = null, domainPromise = null;
+  let episodePromise = null, activeEpisode = null, domainMode = 'manual';
+  async function loadJson(name) {
+    const response = await fetch(baseUrl() + `asr-terms/${name}.json`);
+    if (!response.ok) throw new Error('识别词表加载失败');
+    const raw = await response.text();
+    if (encoder.encode(raw).length > 256 * 1024) throw new Error('识别词表过大');
+    return JSON.parse(raw);
+  }
   async function loadDomain() {
     if (!domainPromise) domainPromise = (async () => {
       await loadScript(baseUrl() + 'asr-domain.js');
-      const sources = await Promise.all(window.JLSASRDomain.packs.map(async id => {
-        const response = await fetch(baseUrl() + `asr-terms/${id}.json`);
-        if (!response.ok) throw new Error('识别词表加载失败');
-        const raw = await response.text();
-        if (encoder.encode(raw).length > 256 * 1024) throw new Error('识别词表过大');
-        return [id, JSON.parse(raw)];
-      }));
+      const sources = await Promise.all(window.JLSASRDomain.packs.map(async id => [id, await loadJson(id)]));
       selectDomain = window.JLSASRDomain.loadPacks(Object.fromEntries(sources));
     })().catch(() => { domainPromise = null; throw new Error('识别词表加载失败，请重新加载扩展'); });
     await domainPromise;
+  }
+  async function findEpisode(title, signal) {
+    try {
+      if (!episodePromise) episodePromise = loadJson('episodes').then(window.JLSASRDomain.loadEpisodes)
+        .catch(error => { episodePromise = null; throw error; });
+      return (await abortable(episodePromise, signal))(title);
+    } catch (error) {
+      signal.throwIfAborted();
+      emit({ type: 'error', scope: 'domain', message: '节目词表加载失败，已关闭自动纠错' });
+      return null;
+    }
   }
   const add = (object, key, amount = 1) => object[key] = Math.min(Number.MAX_SAFE_INTEGER, object[key] + amount);
   function translationStats() {
@@ -236,19 +249,23 @@
     const string = (key, fallback) => typeof config[key] === 'string' ? config[key] : fallback;
     const selection = config.asrPacks ?? config.asrDomain;
     const packs = selection === undefined ? asrPacks : window.JLSASRDomain.normalizePacks(selection);
-    const packsChanged = packs?.join() !== asrPacks?.join();
+    const episode = Object.hasOwn(config, 'episode') ? config.episode : selection === undefined ? activeEpisode : null;
+    const mode = config.domainMode || domainMode;
+    const packsChanged = packs?.join() !== asrPacks?.join() || episode !== activeEpisode;
     const next = { target: string('target', targetLang), apiKey: string('apiKey', apiKey),
       model: string('model', translationModel), baseUrl: string('baseUrl', translationBase),
       promptVersion: string('promptVersion', promptVersion),
       temperature: Number.isFinite(config.temperature) ? config.temperature : temperature,
       maxTokens: Number.isSafeInteger(config.maxTokens) && config.maxTokens > 0 ? config.maxTokens : maxTokens };
-    const changed = packsChanged || next.target !== targetLang || next.apiKey !== apiKey || next.model !== translationModel ||
+    const changed = packsChanged || mode !== domainMode || next.target !== targetLang || next.apiKey !== apiKey || next.model !== translationModel ||
       next.baseUrl !== translationBase || next.promptVersion !== promptVersion || next.temperature !== temperature || next.maxTokens !== maxTokens;
     if (!changed) return;
     if (packsChanged) {
-      domainCorrector = selectDomain(packs);
+      domainCorrector = selectDomain(packs, episode);
       asrPacks = packs;
+      activeEpisode = episode;
     }
+    domainMode = mode;
     resetTranslationState(true);
     targetLang = next.target; apiKey = next.apiKey; translationModel = next.model; translationBase = next.baseUrl;
     promptVersion = next.promptVersion; temperature = next.temperature; maxTokens = next.maxTokens;
@@ -714,8 +731,12 @@
       vadConfig = vadSettings(config.vad);
       await abortable(loadDomain(), signal);
       signal.throwIfAborted();
+      const mode = ['auto', 'off'].includes(config.domainMode) ? config.domainMode : 'manual';
+      const episode = mode === 'auto' ? await findEpisode(config.pageTitle, signal) : null;
+      signal.throwIfAborted();
       setConfig({ target: config.target || 'zh', apiKey: config.apiKey || '', model: config.model || 'deepseek-chat',
-        asrPacks: config.asrPacks ?? config.asrDomain ?? 'gakumas',
+        asrPacks: mode === 'manual' ? config.asrPacks ?? config.asrDomain ?? 'gakumas' : episode ? [episode.pack] : [],
+        domainMode: mode, episode,
         baseUrl: config.baseUrl || 'https://api.deepseek.com', promptVersion: config.promptVersion || PROMPT_VERSION,
         temperature: config.temperature ?? 0.2, maxTokens: config.maxTokens ?? 512 });
       const files = await loadModels(config, progress, signal);
@@ -785,6 +806,7 @@
       rtf: decodeCount ? +(decodeMsTotal / 1000 / Math.max(totalSamples / SAMPLE_RATE, 0.01)).toFixed(3) : 0,
       finals,
       asr_packs: asrPacks?.slice() ?? [],
+      domain: { mode: domainMode, episode: activeEpisode?.episode || '', franchise: activeEpisode?.franchise || '' },
       vad: { ...vadConfig },
       preview_backlog_skips: previewBacklogSkips,
       translations: translateCount,

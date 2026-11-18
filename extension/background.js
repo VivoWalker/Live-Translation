@@ -27,7 +27,7 @@ async function ensureContentScript(tabId) {
   try { if ((await chrome.tabs.sendMessage(tabId, { type: 'jls:ping' }))?.ok) return; } catch {}
   await chrome.scripting.executeScript({ target: { tabId }, files: ['caption-settings.js', 'caption-overlay.js', 'content.js'] });
 }
-async function start({ tabId, target, serverUrl, streamId, engine = 'browser', apiKey = '', serverToken = '', asrPacks, asrDomain }) {
+async function start({ tabId, target, serverUrl, streamId, engine = 'browser', apiKey = '', serverToken = '', asrPacks, asrDomain, domainMode, pageTitle }) {
   const packs = JLSASRDomain.normalizePacks(asrPacks ?? asrDomain);
   await restored;
   const ticket = ++generation;
@@ -49,7 +49,7 @@ async function start({ tabId, target, serverUrl, streamId, engine = 'browser', a
     const response = await chrome.runtime.sendMessage({
       type: 'jls:offscreen-start', sessionId, streamId, tabId, target,
       serverUrl: serverUrl || DEFAULT_SERVER, engine, apiKey, serverToken,
-      asrPacks: packs,
+      asrPacks: packs, domainMode, pageTitle: domainMode === 'auto' ? String(pageTitle || '').slice(0, 240) : undefined,
     });
     if (!current()) return { ok: false, error: '采集已取消' };
     if (!response?.ok) throw new Error(response?.error || '采集启动失败');

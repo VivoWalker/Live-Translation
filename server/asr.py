@@ -10,7 +10,7 @@ from typing import Protocol
 import numpy as np
 import sherpa_onnx
 
-from .asr_domain import DomainCorrector
+from .asr_domain import Correction, DomainCorrector
 from .text import normalize_ja
 
 SAMPLE_RATE = 16000
@@ -32,6 +32,7 @@ class Capabilities:
 class RecognitionContext:
     previous: str = ""
     terms: tuple[str, ...] = ()
+    corrector: DomainCorrector | None = None
 
     @property
     def prompt(self) -> str:
@@ -43,6 +44,7 @@ class Recognition:
     text: str
     original: str
     timestamps: tuple[tuple[float, float, str], ...] = ()
+    changes: tuple[Correction, ...] = ()
 
 
 class Recognizer(Protocol):
@@ -160,8 +162,10 @@ class _OfflineRecognizer:
             result = self._infer(audio, context)
         text = result.text
         if self.language == "ja":
-            text = self.domain.correct(normalize_ja(result.text))
-        return Recognition(text, result.original, result.timestamps)
+            corrector = context.corrector if context and context.corrector is not None else self.domain
+            text, changes = corrector.explain(normalize_ja(result.text))
+            return Recognition(text, result.original, result.timestamps, changes)
+        return result
 
     def _infer(self, audio: np.ndarray, context: RecognitionContext | None) -> Recognition:
         stream = self._rec.create_stream()

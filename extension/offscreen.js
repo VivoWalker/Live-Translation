@@ -41,7 +41,7 @@ async function stopInternal(sessionId) {
   active = null;
   await dispose(old);
 }
-function connect(capture, url, target, token) {
+function connect(capture, url, target, token, settings) {
   return new Promise((resolve, reject) => {
     const sock = capture.ws = new WebSocket(url);
     sock.binaryType = 'arraybuffer';
@@ -54,7 +54,7 @@ function connect(capture, url, target, token) {
     sock.onopen = () => {
       if (!current(capture)) return sock.close();
       sock.send(JSON.stringify({ type: 'auth', token }));
-      sock.send(JSON.stringify({ type: 'config', target }));
+      sock.send(JSON.stringify({ type: 'config', target, ...settings }));
     };
     sock.onmessage = e => {
       if (!current(capture)) return;
@@ -116,7 +116,9 @@ async function start(msg) {
     capture.node = new AudioWorkletNode(capture.ctx, 'pcm-tap', { numberOfInputs: 1, numberOfOutputs: 0,
       channelCount: 1, channelCountMode: 'explicit', processorOptions: { maxPendingBlocks: 20 } });
     if (msg.engine === 'server') {
-      await connect(capture, msg.serverUrl || 'ws://127.0.0.1:8765/ws', msg.target || 'zh', msg.serverToken || '');
+      const settings = msg.domainMode === 'auto' ? { domain: 'auto', page_title: msg.pageTitle }
+        : msg.domainMode === 'off' ? { domain: 'off' } : {};
+      await connect(capture, msg.serverUrl || 'ws://127.0.0.1:8765/ws', msg.target || 'zh', msg.serverToken || '', settings);
       check(capture);
     } else {
       capture.engineStarted = true;
@@ -124,7 +126,7 @@ async function start(msg) {
         if (!current(capture)) return;
         if (event.type === 'progress') report(capture, 'starting', event.message);
         else send(capture, event);
-      } }), capture.cancelledPromise]);
+      }, domainMode: msg.domainMode, pageTitle: msg.pageTitle }), capture.cancelledPromise]);
       check(capture);
     }
     const audioStart = capture.ctx.currentTime;

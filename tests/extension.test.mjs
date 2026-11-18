@@ -876,6 +876,19 @@ test('changing ASR domain cancels old translation and starts with clean context 
   } finally { context.api.stop(); }
 });
 
+test('browser auto domain filters unrelated packs and a fresh session restores manual mode', async () => {
+  const context = engine();
+  await context.api.init({ ...context.config, domainMode: 'auto', pageTitle: '初星学園ＨＲ' });
+  try {
+    await translatedUtterance(context, '日高真白さんと藤田琴音');
+    assert.equal(context.events.find(e => e.type === 'final').text, '日高真白さんと藤田ことね');
+    assert.equal(context.api.stats().domain.episode, '初星学園HR');
+    await context.api.init(context.config);
+    await translatedUtterance(context, '日高真白さん');
+    assert.equal(context.events.filter(e => e.type === 'final').at(-1).text, '陽高真白さん');
+  } finally { context.api.stop(); }
+});
+
 test('a failed lexicon load can retry and stopping during the load cannot publish a ready engine', async () => {
   let calls = 0;
   const loaded = deferred();
