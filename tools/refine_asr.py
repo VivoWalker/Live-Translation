@@ -48,8 +48,8 @@ async def run(args):
         baseline = await asyncio.to_thread(primary.recognize, audio, context)
         decision = await refine_offline(baseline, domain, audio, verifiers)
         previous = decision.text[:512]
-        if review and (decision.action != Action.ACCEPT_ORIGINAL or baseline.changes):
-            review.record(review_session, index, baseline, decision, domain.episode or domain.franchise)
+        if review and (decision.action != Action.ACCEPT_ORIGINAL or baseline.changes or decision.candidates):
+            review.record(review_session, index, baseline, decision, domain.episode or domain.franchise, pcm=audio)
         rows.append({"id": clip.id, "original": baseline.original, **asdict(decision)})
     return {"dataset_sha256": dataset.digest, "model": primary.name, "segments": rows,
             "verification": {agent.secondary.name: agent.snapshot() for agent in verifiers}}

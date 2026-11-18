@@ -236,13 +236,17 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = ReviewStore(Path(directory) / "audit.sqlite", limit=2)
             for n in range(3):
-                store.record(str(n), 0, primary, decision, DOMAIN.episode)
+                store.record(str(n), 0, primary, decision, DOMAIN.episode, pcm=AUDIO * (n + 1))
             self.assertEqual(len(store.list()), 2)
-            self.assertEqual(validate_candidates(candidates(store.list()), []), [])
+            self.assertEqual(validate_candidates(candidates(store.list(), store.blocked()), []), [])
             for row in store.list():
-                store.review(row["id"], "accepted", VERIFIED)
-            proposals = candidates(store.list())
-            holdout = [{"episode": DOMAIN.episode, "baseline": BASELINE, "reference": VERIFIED}]
-            self.assertTrue(validate_candidates(proposals, holdout)[0]["promotable"])
-            holdout.append({"episode": DOMAIN.episode, "baseline": BASELINE, "reference": BASELINE})
-            self.assertFalse(validate_candidates(proposals, holdout)[0]["promotable"])
+                store.review(row["id"], "accepted", VERIFIED, recording=row["session"], reviewer="tester", license="fixture")
+            proposals = candidates(store.list(), store.blocked())
+            holdout = [{"episode": DOMAIN.episode, "baseline": prefix + BASELINE, "reference": prefix + VERIFIED,
+                        "recording": prefix} for prefix in ("はい、", "ところで、")]
+            report = validate_candidates(proposals, holdout)[0]
+            self.assertEqual(report["status"], "approval_required")
+            self.assertLess(report["cer_after"], report["cer_before"])
+            self.assertGreater(report["entity_f1_after"], report["entity_f1_before"])
+            holdout.append({"episode": DOMAIN.episode, "baseline": BASELINE, "reference": BASELINE, "recording": "other"})
+            self.assertEqual(validate_candidates(proposals, holdout)[0]["status"], "rejected")

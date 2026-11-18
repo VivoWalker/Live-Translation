@@ -30,17 +30,35 @@ python tools/refine_asr.py out/manifest.json --model sensevoice=/models/sensevoi
 
 ## 人工审核
 
-配置 `--agent-audit` 后，SQLite 保存最多 512 条最近决策，包含原始转录、主模型结果、提议、来源和理由。审阅人员听取有授权的原始材料并核验完整转录。数据库位于本地文件系统，服务默认关闭审核持久化。
+配置 `--agent-audit` 后，SQLite 保存最多 512 条最近决策，按会话和段号隔离。记录包括原始转录、词表后文本、提议、实际显示、证据和 PCM SHA-256。保存默认为关闭。审阅人员从有权限的原始材料独立核验完整转录，并填写原录音组、核验人和使用授权。
 
 ```sh
 python tools/review_asr.py out/asr-review.sqlite list --status pending
-python tools/review_asr.py out/asr-review.sqlite accept 12 --reference '已人工核验的日语转录'
+python tools/review_asr.py out/asr-review.sqlite accept 12 --reference '已人工核验的日语转录' \
+  --recording archive-01 --reviewer reviewer-a --license '授权的本地测试'
 python tools/review_asr.py out/asr-review.sqlite reject 13
 python tools/review_asr.py out/asr-review.sqlite candidates
-python tools/review_asr.py out/asr-review.sqlite validate /path/to/independent-holdout.jsonl
+python tools/review_asr.py out/asr-review.sqlite validate out/independent-holdout.jsonl --output out/proposals.json
+python tools/review_asr.py out/asr-review.sqlite approve out/independent-holdout.jsonl <rule-id> \
+  --reviewer release-reviewer --output out/approval.json
 python tools/review_asr.py out/asr-review.sqlite export > out/reviewed-transcripts.jsonl
 ```
 
-验证文件每行提供独立的 `id`、`episode`、主模型 `baseline`、人工 `reference`、`source` 与 `verified: true`。工具比较关闭、手动和自动词包，并为至少两次人工确认、无拒绝记录的节目规则检查留出集。规则有改进且未引起回归时会标为可采用。审核人员可将合格规则写入节目目录，经测试后重新部署。模型冲突产生的未经核验候选保留待调查状态。
+留出 JSONL 每行提供 `id`、`episode`、原始主模型 `baseline`、人工 `reference`、`source`、`recording`、`reviewer`、`license`、`pcm_sha256` 与 `verified: true`。PCM 摘要使用传给 ASR 的 16 kHz 单声道小端 float32 样本。离线可用 `tools.benchmark_stream.load_audio` 和 `server.asr_review.pcm_sha256` 生成。工具会拒绝重复摘要、审核样本的同源录音组和复制的参考文本对。
 
-导出仅包含经过人工确认的文字，保存音频和构建训练集需要独立授权与来源记录。可选微调、模型发布与自动回滚未接入实时服务。
+候选从经过核验的文字与识别差异生成。每条规则至少需两组独立审核录音支持。验证比较留出 CER 和该候选规范词的 Entity F1。任何逐样本 CER 退化、实体 F1 下降或已拒绝记录都会阻止批准。规则需在至少两组受影响的留出录音上获得正收益。批准文件包含规则及留出摘要，仍需维护者核对术语来源、手动更新节目目录并通过 CI。更换来源、删除记录或记录过期都不会清除逻辑拒绝状态。
+
+用 `backup <path>` 生成一致的 SQLite 副本。该副本可直接作为新审核数据库迁移。用 `delete <id>` 删除一条记录，`compact` 回收已释放的 SQLite 页面。完整卸载审核数据时，停止服务后管理数据库及其副本。旧库自动迁移，原人工文本保留，完整训练和候选验证需要带音频摘要和来源的新记录。
+
+### 监督数据准备
+
+`training-index --output out/labels.json` 导出有核验人和使用权的去重参考文本。工具按原始录音组分配训练集和验证集。授权音频需保存在独立的本地目录，由 PCM 摘要关联，`pending` 决策和第二模型的猜测不会作为监督标签。训练和部署可保存以下元数据，便于复现实验和回滚。
+
+```yaml
+base_model_revision: <immutable-model-revision>
+training_index: out/labels.json
+index_sha256: <reviewed-index-digest>
+evaluation_manifest: out/independent-manifest.json
+output_directory: out/experiment-01
+rollback_model_revision: <last-accepted-model-revision>
+```

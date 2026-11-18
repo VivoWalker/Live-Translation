@@ -444,10 +444,10 @@ class StreamSession:
                 text = normalize_ja(primary.original)
             elif isinstance(decision, Decision) and epoch == self.translation_epoch and self.agent is agent:
                 text = decision.text
-                if self.review and (decision.action != Action.ACCEPT_ORIGINAL or primary.changes):
+                if self.review and (decision.action != Action.ACCEPT_ORIGINAL or primary.changes or decision.candidates):
                     try:
                         self.review.record(self._review_session, seg_id, primary, decision,
-                                           (domain.episode or domain.franchise) if domain else "")
+                                           (domain.episode or domain.franchise) if domain else "", pcm=audio)
                     except (OSError, sqlite3.Error):
                         agent.counts["audit_failures"] += 1
             elif isinstance(decision, Exception):
