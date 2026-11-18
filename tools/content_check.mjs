@@ -36,8 +36,16 @@ const files = new Map([
     .map(name => ['/ext-assets/wasm/' + name, resolve('extension/wasm', name)]),
 ]);
 if (WASM) for (const file of files.values()) assert(existsSync(file), 'Missing real-model fixture: ' + file);
+const popupFiles = new Set(['popup.html', 'popup.css', 'interface.css', 'caption-settings.js', 'popup.js']);
 const profile = mkdtempSync(join(tmpdir(), 'jls-content-'));
 const server = createServer((req, res) => {
+  const popupFile = req.url.startsWith('/popup/') && req.url.slice('/popup/'.length);
+  if (popupFiles.has(popupFile)) {
+    const type = popupFile.endsWith('.css') ? 'text/css' : popupFile.endsWith('.js') ? 'text/javascript' : 'text/html';
+    res.writeHead(200, { 'Content-Type': type + '; charset=utf-8' });
+    res.end(readFileSync(resolve('extension', popupFile)));
+    return;
+  }
   if (WASM && files.has(req.url)) {
     const file = files.get(req.url);
     res.writeHead(200, { 'Content-Type': file.endsWith('.js') ? 'text/javascript' : file.endsWith('.wasm') ? 'application/wasm' : 'application/octet-stream', 'Content-Length': statSync(file).size });
@@ -97,6 +105,40 @@ async function memorySnapshot(label) {
   await call('HeapProfiler.collectGarbage');
   const heap = await call('Runtime.getHeapUsage');
   return { label, heapBytes: heap.usedSize, backingBytes: heap.backingStorageSize, ...await call('Memory.getDOMCounters') };
+}
+async function checkPopupSizing() {
+  const stub = await call('Page.addScriptToEvaluateOnNewDocument', { source: `window.chrome = {
+    tabs: { query: async () => [{ id: 1, title: '字幕弹窗尺寸测试', url: 'https://example.invalid' }] },
+    storage: { local: { get: async () => ({}) }, session: { get: async () => ({}) }, onChanged: { addListener() {} } },
+    runtime: { sendMessage: async () => ({ running: false }) },
+  };` });
+  try {
+    for (const scale of [1, 1.5]) {
+      // A toolbar popup initially gets a small viewport from Chrome. Its
+      // contents must request their full width before the bubble can expand.
+      await call('Emulation.setDeviceMetricsOverride', { width: 152, height: 224, deviceScaleFactor: scale, mobile: false });
+      await call('Page.navigate', { url: PAGE + 'popup/popup.html' });
+      for (let attempt = 0; attempt < 40; attempt++) {
+        if (await evaluate(`document.querySelector('#tab-title')?.textContent === '字幕弹窗尺寸测试'`)) break;
+        await sleep(50);
+      }
+      const width = await evaluate('document.documentElement.scrollWidth');
+      assert(width >= 380 && width <= 420, 'popup must request its width from the initial viewport, got ' + width);
+      await call('Emulation.setDeviceMetricsOverride', { width, height: 580, deviceScaleFactor: scale, mobile: false });
+      const layout = await evaluate(`(() => {
+        const heading = document.querySelector('.popup-header h1');
+        document.querySelector('#caption-tab').click();
+        return { headingHeight: heading.offsetHeight, footerBottom: document.querySelector('#start').getBoundingClientRect().bottom,
+          scrollbar: document.documentElement.scrollWidth - innerWidth, hasEditor: !!document.querySelector('[data-setting="fontSize"]') };
+      })()`);
+      assert(layout.headingHeight <= 36 && layout.footerBottom <= 580 && layout.scrollbar === 0 && layout.hasEditor,
+        JSON.stringify(layout));
+    }
+    await shot('popup');
+  } finally {
+    await call('Page.removeScriptToEvaluateOnNewDocument', stub);
+  }
+  checks.push('popup requests its full width from a small initial viewport at 1× and 1.5× and keeps its footer visible');
 }
 async function stressCaptions() {
   await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
@@ -211,7 +253,9 @@ try {
   const { targetId } = await call('Target.createTarget', { url: PAGE }, null);
   ({ sessionId } = await call('Target.attachToTarget', { targetId, flatten: true }, null));
   await call('Runtime.enable'); await call('Page.enable');
+  await checkPopupSizing();
   await call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  await call('Page.navigate', { url: PAGE });
   await sleep(300); await inject();
   await evaluate(`send({type:'partial',id:100,text:'今日は東京の天気について'});window.__sourceFont=getComputedStyle(cap('.live .ja')).fontSize;send({type:'final',id:100,text:'今日は東京の天気についてお話しします。'});
     window.__sourceRow=cap('.rows .row[data-id="100"]');window.__sourceJa=__sourceRow?.querySelector('.ja');
