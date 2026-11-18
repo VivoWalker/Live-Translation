@@ -66,6 +66,7 @@ class SessionConfig:
 class Stats:
     chunks: int = 0
     audio_seconds: float = 0.0
+    audio_processed_samples: int = 0
     decodes: int = 0
     decode_ms: float = 0.0
     finals: int = 0
@@ -83,6 +84,7 @@ class Stats:
         dec = self.decodes or 1
         return {
             "audio_seconds": round(self.audio_seconds, 2),
+            "audio_processed_seconds": round(self.audio_processed_samples / SAMPLE_RATE, 3),
             "decodes": self.decodes,
             "avg_decode_ms": round(self.decode_ms / dec, 1),
             "rtf": round(self.decode_ms / 1000 / max(self.audio_seconds, 0.01), 4),
@@ -241,6 +243,7 @@ class StreamSession:
             await self._step(start + end, preview=False)
         self._vad_pending = pending[consumed:].copy()
         await self._maybe_preview(start + consumed)
+        self.stats.audio_processed_samples = start + consumed
 
     # ---------------------------------------------------------------- ASR/MT
     @property

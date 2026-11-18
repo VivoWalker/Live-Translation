@@ -1,0 +1,44 @@
+# 本地 Benchmark
+
+安装基线与评估依赖，并准备具有合法来源、按同一规则校对的音频。本地研究样本与私有清单可放在 Git 忽略的 `out/` 目录。
+
+```sh
+python -m pip install -r requirements.txt -r requirements/benchmark.txt
+python tools/import_benchmark.py out/clips --output out/manifest.json --name "研究样本" \
+  --labels out/checked-transcripts.txt --source "来源" --license "本地评估授权"
+python tools/benchmark.py asr out/manifest.json --threads 2 \
+  --model sensevoice=/path/to/sensevoice-onnx --model whisper=/path/to/whisper-base --output out/asr.json
+python tools/benchmark_vad.py out/manifest.json --output out/vad.json
+```
+
+每个模型单独启动进程，使用相同文件、音频转换、线程数、词包和预热次数。报告包含清单及音频的 SHA-256、实际设备、精度、模型、加载时间和 CPU/GPU 环境。默认关闭词包，启用时用 `--packs` 审计选项。默认报告只保留指标。明确需要比较具体输出时可加 `--include-text`。 [清单格式](../testdata/benchmark/README.md)
+
+## 指标
+
+| 指标 | 定义 |
+| --- | --- |
+| 原始 CER | 对适配器返回的原始转录计算 Unicode 码点编辑距离。另报告实际字幕表记的 CER |
+| 规范化 CER | NFKC 后去掉 Unicode 空白，保留标点、大小写和书写内容 |
+| WER | 按 Janome 0.5.0 词元切分规范化日语，汇总编辑数与参考词元数 |
+| 实体 | 对预设术语表执行最长不重叠字面匹配，按出现次数报告 Precision、Recall 和 F1 |
+| ASR RTF | 识别阶段耗时之和除以音频时长，预热和载入独立统计 |
+| 内存 | RSS 每 0.5 秒采样。可用时以 `nvidia-smi` 采样进程显存 |
+| VAD | 在同一最终识别路径扫描 9 组静音与时长设置，报告输出数、强制切分和以音频采样点计的检测延迟 |
+| 翻译 | 使用 SacreBLEU chrF 对独立中英译文评估，并报告缺失比例 |
+| DER | 零宽容边界，整段音频计分，保留重叠说话 |
+
+没有可核验参考转录的样本仍可做速度和链路测试。对应的准确率字段为 `null`。
+
+## 端到端与稳定性
+
+先启动本地服务并配置同一访问令牌。可使用 mock 翻译验证链路。要测在线服务延迟时，应明确启用对应服务商并使用允许传输的台词。默认连接 loopback。
+
+```sh
+python tools/benchmark.py stream out/manifest.json --server-pid 12345 --output out/stream.json
+python tools/benchmark.py translation out/manifest.json --target zh --predictions out/zh.json
+python tools/benchmark.py diarization out/manifest.json --predictions out/turns.json
+```
+
+每条音频通过新认证会话按 100 ms PCM 实时送入。finalization 延迟从原音频端点到接收 final，翻译延迟从接收 final 到收到同一 ID 的译文，P50/P95 使用最近秩。丢失率比较服务器统计的 final 与完整接收的 final，无法取得最终统计的连接单独报告关闭状态。译文缺失率以实际收到的 final 为分母。报告记录积压、异常后新会话恢复和服务进程 RSS。浏览器持续运行使用独立的 Chromium 检查。 [浏览器验证](development.md)
+
+译文预测文件是按片段 ID 索引的 JSON 字符串对象。说话人预测按同样 ID 索引区间数组。录播 DER 需要安装说话人评估依赖。测试样本的领域、硬件、词包或流程变化后，应以新的报告为准。

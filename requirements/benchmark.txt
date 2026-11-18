@@ -1,0 +1,4 @@
+-r ../requirements-dev.txt
+janome==0.5.0
+sacrebleu>=2.5,<3
+psutil>=6,<8
