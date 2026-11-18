@@ -12,3 +12,5 @@ testdata/long_*.mp3
 .chrome-ext-test*/
 .edge-ext-test*/
 *.log
+字幕服务.lnk
+start-service.cmd
