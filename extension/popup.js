@@ -1,197 +1,190 @@
-/* Popup: pick the tab, start capture, report service health and capture state. */
+/* Edit capture settings and preview the caption style before or during playback. */
 'use strict';
 
 const DEFAULT_SERVER = 'ws://127.0.0.1:8765/ws';
-const $ = (id) => document.getElementById(id);
-const dot = $('dot');
-const statusEl = $('status');
-const btnStart = $('start');
-const btnStop = $('stop');
-const targetEl = $('target');
-const serverEl = $('server');
-const engineEl = $('engine');
-const apiKeyEl = $('apikey');
-const serverField = $('server-field');
-const tokenField = $('token-field');
-const tokenEl = $('server-token');
-const cacheStatusEl = $('model-cache-status');
-const domainEl = $('asr-domain');
+const $ = id => document.getElementById(id);
+const startButton = $('start');
+const stopButton = $('stop');
+const engine = $('engine');
+const target = $('target');
+const domain = $('asr-domain');
+const apiKey = $('apikey');
+const server = $('server');
+const serverToken = $('server-token');
+const sessionFields = [engine, target, domain, apiKey, server, serverToken];
+let activeTab, phase = 'idle', operation = 0, ready = false, cacheInfo;
+let prefs = JLS.captionPreferences();
+const preview = JLS.createCaptionPreview($('caption-preview'), { compact: true });
+const editor = JLS.createCaptionEditor($('caption-editor'), {
+  onChange(settings, commit) {
+    applySettings(settings);
+    if (commit) {
+      chrome.runtime.sendMessage({ type: 'jls:caption-settings-set', settings })
+        .then(response => { if (!response?.ok) showMessage('字幕设置未能保存', true); })
+        .catch(() => showMessage('字幕设置未能保存', true));
+    }
+  },
+});
 
-let activeTab = null;
-let running = false;
-let pollTimer = null;
-
-function setDot(cls) {
-  dot.className = 'dot' + (cls ? ' ' + cls : '');
+function applySettings(value) {
+  prefs = JLS.captionPreferences(value);
+  document.documentElement.dataset.theme = prefs.theme;
+  editor.update(prefs);
+  preview.update(prefs, target.value);
 }
 
-function setStatus(text, isErr) {
-  statusEl.textContent = text;
-  statusEl.className = 'status' + (isErr ? ' err' : '');
+function showMessage(message, error = false) {
+  const notice = $('message');
+  notice.hidden = !message;
+  notice.textContent = message || '';
+  notice.dataset.kind = error ? 'error' : '';
 }
 
-async function checkServer() {
-  const url = serverEl.value.trim() || DEFAULT_SERVER;
-  const health = url.replace(/^ws/, 'http').replace(/\/ws$/, '/health');
-  try {
-    const r = await fetch(health, { cache: 'no-store' });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const j = await r.json();
-    return j;
-  } catch (e) {
-    return null;
-  }
+function setPhase(next, message) {
+  phase = next;
+  const active = ['starting', 'connected', 'capturing', 'stopping'].includes(phase);
+  const labels = { idle: '待开始', starting: '准备中', connected: '已连接', capturing: '字幕运行中', stopping: '正在停止', error: '需要处理' };
+  $('status').textContent = labels[phase] || labels.idle;
+  $('capture-status').dataset.phase = phase === 'error' ? 'error'
+    : ['connected', 'capturing'].includes(phase) ? 'live' : active ? 'busy' : 'idle';
+  startButton.hidden = active;
+  startButton.disabled = !ready || active;
+  stopButton.hidden = !active;
+  stopButton.disabled = phase === 'stopping';
+  for (const field of sessionFields) field.disabled = active;
+  showMessage(message, phase === 'error');
 }
 
-function syncEngineFields() {
-  const browser = engineEl.value === 'browser';
-  serverField.hidden = browser;
-  tokenField.hidden = browser;
-  cacheStatusEl.hidden = !browser;
-  $('asr-domain-field').hidden = !browser;
+function renderCaptureStatus(status) {
+  if (phase === 'stopping' || !status?.phase) return;
+  if (phase === 'starting' && status.phase === 'idle') return;
+  setPhase(status.phase, ['error', 'starting'].includes(status.phase) ? status.message : '');
 }
 
-function showModelCache(info) {
-  cacheStatusEl.textContent = info?.message || '';
-  cacheStatusEl.className = 'hint' + (info?.warning ? ' warning' : '');
+function renderFields() {
+  const browser = engine.value === 'browser';
+  for (const id of ['asr-domain-field', 'apikey-field']) $(id).hidden = !browser;
+  for (const id of ['server-field', 'token-field']) $(id).hidden = browser;
+  const cache = $('model-cache-status');
+  cache.hidden = !browser || !(cacheInfo?.saved || cacheInfo?.warning);
+  cache.textContent = cacheInfo?.warning ? cacheInfo.message : cacheInfo?.saved ? '识别模型已缓存' : '';
+  cache.className = 'model-cache' + (cacheInfo?.warning ? ' warning' : '');
 }
 
-function setRunning(on) {
-  running = on;
-  btnStart.disabled = on;
-  btnStop.disabled = !on;
-  if (on) setDot('ok');
-  else setDot(null);
+function showPanel(captions) {
+  $('session-tab').setAttribute('aria-pressed', String(!captions));
+  $('caption-tab').setAttribute('aria-pressed', String(captions));
+  $('session-panel').hidden = captions;
+  $('caption-panel').hidden = !captions;
+  $('menu-content').scrollTop = 0;
+  if (captions) preview.update(prefs, target.value);
 }
+$('session-tab').addEventListener('click', () => showPanel(false));
+$('caption-tab').addEventListener('click', () => showPanel(true));
 
-async function pollState() {
-  const cache = (await chrome.storage.local.get('jlsModelCache')).jlsModelCache;
-  showModelCache(cache);
-  const st = (await chrome.storage.session.get('jlsStatus')).jlsStatus || {};
-  if (!st.phase) return;
-  if (st.phase === 'error') {
-    setRunning(false);
-    setStatus(st.message || '出错了', true);
-    setDot('bad');
-  } else if (st.phase === 'connected') {
-    setStatus(st.message || '已连接', false);
-    setDot('ok');
-  } else if (st.phase === 'capturing') {
-    setStatus(st.message || '正在采集声音', false);
-    setDot('busy');
-  } else if (st.phase === 'idle') {
-    setRunning(false);
-    setStatus(st.message || '已停止', false);
-    setDot(null);
-  } else if (st.phase === 'starting') {
-    setStatus(st.message || '启动中…', false);
-    setDot('busy');
-  }
+function focusRequiredField(field, message) {
+  showPanel(false);
+  setPhase('error', message);
+  field.focus();
 }
 
 async function init() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  activeTab = tab || null;
-  $('tab-title').textContent = tab ? (tab.title || tab.url || '当前标签页') : '没有可用标签页';
+  const [[tab], store, capture] = await Promise.all([
+    chrome.tabs.query({ active: true, currentWindow: true }),
+    chrome.storage.local.get(['jlsTarget', 'jlsServer', 'jlsEngine', 'jlsApiKey', 'jlsServerToken', 'jlsModelCache', 'jlsAsrDomain', 'jlsCaptionPrefs']),
+    chrome.runtime.sendMessage({ type: 'jls:query' }).catch(() => null),
+  ]);
+  activeTab = tab;
+  $('tab-title').textContent = tab?.title || tab?.url || '没有可用标签页';
+  $('tab-title').title = $('tab-title').textContent;
+  target.value = store.jlsTarget === 'en' ? 'en' : 'zh';
+  engine.value = store.jlsEngine === 'server' ? 'server' : 'browser';
+  server.value = store.jlsServer || DEFAULT_SERVER;
+  apiKey.value = store.jlsApiKey || '';
+  serverToken.value = store.jlsServerToken || '';
+  domain.value = ['off', 'anime', 'gakumas'].includes(store.jlsAsrDomain) ? store.jlsAsrDomain : 'gakumas';
+  cacheInfo = store.jlsModelCache;
+  applySettings(store.jlsCaptionPrefs);
+  renderFields();
+  const { jlsStatus: currentStatus } = await chrome.storage.session.get('jlsStatus');
+  ready = true;
+  if (capture?.running) renderCaptureStatus(currentStatus?.phase === 'idle' || !currentStatus ? { phase: 'starting' } : currentStatus);
+  else setPhase(currentStatus?.phase === 'error' ? 'error' : 'idle', currentStatus?.phase === 'error' ? currentStatus.message : '');
 
-  const store = await chrome.storage.local.get(['jlsTarget', 'jlsServer', 'jlsEngine', 'jlsApiKey', 'jlsServerToken', 'jlsModelCache', 'jlsAsrDomain']);
-  targetEl.value = store.jlsTarget || 'zh';
-  serverEl.value = store.jlsServer || DEFAULT_SERVER;
-  engineEl.value = store.jlsEngine || 'browser';
-  apiKeyEl.value = store.jlsApiKey || '';
-  tokenEl.value = store.jlsServerToken || '';
-  domainEl.value = ['off', 'anime', 'gakumas'].includes(store.jlsAsrDomain) ? store.jlsAsrDomain : 'gakumas';
-  showModelCache(store.jlsModelCache);
-  syncEngineFields();
-
-  const st = await chrome.runtime.sendMessage({ type: 'jls:query' }).catch(() => null);
-  if (st && st.running) setRunning(true);
-
-  const health = engineEl.value === 'browser' ? true : await checkServer();
-  if (health) setDot(running ? 'ok' : null);
-  else {
-    setDot('bad');
-    setStatus('服务未启动：先运行 python -m server.app', true);
-  }
-
-  pollTimer = setInterval(pollState, 500);
-
-  targetEl.addEventListener('change', () => chrome.storage.local.set({ jlsTarget: targetEl.value }));
-  serverEl.addEventListener('change', () => chrome.storage.local.set({ jlsServer: serverEl.value.trim() }));
-  engineEl.addEventListener('change', () => {
-    chrome.storage.local.set({ jlsEngine: engineEl.value });
-    syncEngineFields();
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'session' && changes.jlsStatus) renderCaptureStatus(changes.jlsStatus.newValue);
+    if (area !== 'local') return;
+    if (changes.jlsCaptionPrefs) applySettings(changes.jlsCaptionPrefs.newValue);
+    if (changes.jlsModelCache) {
+      cacheInfo = changes.jlsModelCache.newValue;
+      renderFields();
+    }
   });
-  apiKeyEl.addEventListener('change', () => chrome.storage.local.set({ jlsApiKey: apiKeyEl.value.trim() }));
-  tokenEl.addEventListener('change', () => chrome.storage.local.set({ jlsServerToken: tokenEl.value.trim() }));
-  domainEl.addEventListener('change', () => chrome.storage.local.set({ jlsAsrDomain: domainEl.value }));
+
+  const keys = ['jlsEngine', 'jlsTarget', 'jlsAsrDomain', 'jlsApiKey', 'jlsServer', 'jlsServerToken'];
+  sessionFields.forEach((field, index) => field.addEventListener('change', () => {
+    chrome.storage.local.set({ [keys[index]]: field.value.trim() }).catch(() => {});
+    if (field === engine) renderFields();
+    if (field === target) preview.update(prefs, target.value);
+    if (phase === 'error') setPhase('idle');
+  }));
 }
 
-btnStart.addEventListener('click', async () => {
-  if (!activeTab || !activeTab.id) {
-    setStatus('请先打开一个播放视频的网页', true);
+startButton.addEventListener('click', async () => {
+  if (!ready || !['idle', 'error'].includes(phase)) return;
+  if (!activeTab?.id || /^(chrome|edge|about|chrome-extension):/.test(activeTab.url || '')) {
+    setPhase('error', '请打开带有音频的普通网页');
     return;
   }
-  const url = activeTab.url || '';
-  if (/^(chrome|edge|about|chrome-extension):/.test(url)) {
-    setStatus('浏览器内部页面无法采集，请换一个普通网页', true);
+  const browser = engine.value === 'browser';
+  const config = {
+    tabId: activeTab.id, target: target.value, engine: engine.value, asrDomain: domain.value,
+    serverUrl: server.value.trim() || DEFAULT_SERVER, apiKey: apiKey.value.trim(), serverToken: serverToken.value.trim(),
+  };
+  if (browser && !config.apiKey) {
+    focusRequiredField(apiKey, '请填写 DeepSeek API Key');
     return;
   }
-  const health = engineEl.value === 'browser' ? true : await checkServer();
-  if (!health) {
-    setDot('bad');
-    setStatus('字幕服务没有运行：先执行 .\\run.ps1', true);
+  if (!browser && !config.serverToken) {
+    focusRequiredField(serverToken, '请填写本地服务访问令牌');
     return;
   }
-
-  if (engineEl.value === 'browser' && !apiKeyEl.value.trim()) {
-    setDot('bad');
-    setStatus('浏览器内模式需要 DeepSeek Key（翻译用）', true);
-    return;
+  if (!browser) {
+    try {
+      if (!['ws:', 'wss:'].includes(new URL(config.serverUrl).protocol)) throw new Error();
+    } catch {
+      focusRequiredField(server, '请输入以 ws:// 或 wss:// 开头的服务地址');
+      return;
+    }
   }
-  if (engineEl.value === 'server' && !tokenEl.value.trim()) {
-    setStatus('请填写服务启动时显示的访问令牌', true);
-    return;
-  }
-  chrome.storage.local.set({ jlsEngine: engineEl.value, jlsApiKey: apiKeyEl.value.trim(), jlsTarget: targetEl.value, jlsAsrDomain: domainEl.value });
-
-  btnStart.disabled = true;
-  setStatus('正在开始…');
-  setDot('busy');
+  const ticket = ++operation;
+  setPhase('starting');
   try {
-    // The stream id must be minted in a user-gesture context: do it here in the
-    // popup, not in the service worker.
-    const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: activeTab.id });
-    const r = await chrome.runtime.sendMessage({
-      type: 'jls:start',
-      streamId,
-      tabId: activeTab.id,
-      target: targetEl.value,
-      serverUrl: serverEl.value.trim() || DEFAULT_SERVER,
-      engine: engineEl.value,
-      apiKey: apiKeyEl.value.trim(),
-      serverToken: tokenEl.value.trim(),
-      asrDomain: domainEl.value,
-    });
-    if (!r || !r.ok) throw new Error((r && r.error) || '启动失败');
-    setRunning(true);
-    setStatus('已开始，字幕会出现在网页底部');
-    setDot('ok');
-  } catch (e) {
-    await chrome.runtime.sendMessage({ type: 'jls:stop' }).catch(() => {});
-    setRunning(false);
-    setDot('bad');
-    setStatus(String(e.message || e), true);
+    // Chrome grants tab capture from the popup's click.
+    const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: config.tabId });
+    if (ticket !== operation) return;
+    // Autofilled credentials and values entered immediately before the click also persist.
+    chrome.storage.local.set({ jlsEngine: config.engine, jlsTarget: config.target, jlsAsrDomain: config.asrDomain,
+      jlsApiKey: config.apiKey, jlsServer: config.serverUrl, jlsServerToken: config.serverToken }).catch(() => {});
+    const response = await chrome.runtime.sendMessage({ type: 'jls:start', streamId, ...config });
+    if (ticket !== operation) return;
+    if (!response?.ok) throw new Error(response?.error || '启动失败');
+    setPhase('capturing');
+  } catch (error) {
+    if (ticket === operation) setPhase('error', error.message || '无法开始字幕');
+  }
+});
+stopButton.addEventListener('click', async () => {
+  const previous = phase;
+  ++operation;
+  setPhase('stopping');
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'jls:stop' });
+    if (!response?.ok) throw new Error();
+    setPhase('idle');
+  } catch {
+    setPhase(previous, '停止失败，请重试');
   }
 });
 
-btnStop.addEventListener('click', async () => {
-  await chrome.runtime.sendMessage({ type: 'jls:stop' }).catch(() => {});
-  setRunning(false);
-  setStatus('已停止');
-  setDot(null);
-});
-
-window.addEventListener('unload', () => clearInterval(pollTimer));
-
-init();
+init().catch(() => setPhase('error', '无法读取扩展设置，请重新打开菜单'));
