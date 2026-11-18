@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from server.asr_review import (STATUS, ReviewStore, candidates, compare_contexts, load_holdout,
-                               reviewed_samples, training_index, validate_candidates)
+                               reviewed_samples, suggestions, training_index, validate_candidates)
 from server.episodes import EpisodeCatalog
 
 
@@ -30,6 +30,7 @@ def main():
     reject = commands.add_parser("reject")
     reject.add_argument("id", type=int)
     commands.add_parser("candidates")
+    commands.add_parser("suggestions")
     gate = commands.add_parser("validate")
     gate.add_argument("holdout", type=Path)
     gate.add_argument("--episode-catalog", type=Path)
@@ -68,6 +69,8 @@ def main():
             return
         elif args.command == "training-index":
             output = training_index(store.list("accepted"))
+        elif args.command == "suggestions":
+            output = {"schema": "asr-unverified-suggestions-v1", "suggestions": suggestions(store.list("pending"))}
         elif args.command == "backup":
             store.backup(args.path)
             output = {"backed_up": True}

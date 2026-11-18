@@ -197,6 +197,22 @@ def reviewed_samples(rows):
     return [row for key, row in unique.items() if key not in conflicts]
 
 
+def suggestions(rows, minimum=2):
+    """Surface recurring model hypotheses for review without certifying them as evidence."""
+    sightings = defaultdict(set)
+    for row in rows:
+        if row["status"] != "pending":
+            continue
+        trace = row["trace"]
+        sample = row.get("pcm_sha256") or _digest((trace["original"], trace["proposed"]))
+        for key in _rules(trace):
+            sightings[key].add(sample)
+    ranked = sorted(sightings, key=lambda key: (-len(sightings[key]), key))
+    return [{"episode": episode, "alias": alias, "canonical": canonical,
+             "distinct_samples": len(sightings[(episode, alias, canonical)]), "verified": False}
+            for episode, alias, canonical in ranked if len(sightings[(episode, alias, canonical)]) >= minimum][:64]
+
+
 def _corrector(proposal):
     term = EpisodeTerm(proposal["canonical"], "", "reviewed", "normal", True,
                        proposal["source"], (proposal["alias"],))

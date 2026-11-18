@@ -37,6 +37,7 @@ python tools/review_asr.py out/asr-review.sqlite list --status pending
 python tools/review_asr.py out/asr-review.sqlite accept 12 --reference '已人工核验的日语转录' \
   --recording archive-01 --reviewer reviewer-a --license '授权的本地测试'
 python tools/review_asr.py out/asr-review.sqlite reject 13
+python tools/review_asr.py out/asr-review.sqlite suggestions
 python tools/review_asr.py out/asr-review.sqlite candidates
 python tools/review_asr.py out/asr-review.sqlite validate out/independent-holdout.jsonl --output out/proposals.json
 python tools/review_asr.py out/asr-review.sqlite approve out/independent-holdout.jsonl <rule-id> \
@@ -46,7 +47,7 @@ python tools/review_asr.py out/asr-review.sqlite export > out/reviewed-transcrip
 
 留出 JSONL 每行提供 `id`、`episode`、原始主模型 `baseline`、人工 `reference`、`source`、`recording`、`reviewer`、`license`、`pcm_sha256` 与 `verified: true`。PCM 摘要使用传给 ASR 的 16 kHz 单声道小端 float32 样本。离线可用 `tools.benchmark_stream.load_audio` 和 `server.asr_review.pcm_sha256` 生成。工具会拒绝重复摘要、审核样本的同源录音组和复制的参考文本对。
 
-候选从经过核验的文字与识别差异生成。每条规则至少需两组独立审核录音支持。验证比较留出 CER 和该候选规范词的 Entity F1。任何逐样本 CER 退化、实体 F1 下降或已拒绝记录都会阻止批准。规则需在至少两组受影响的留出录音上获得正收益。批准文件包含规则及留出摘要，仍需维护者核对术语来源、手动更新节目目录并通过 CI。更换来源、删除记录或记录过期都不会清除逻辑拒绝状态。
+`suggestions` 汇总不同片段里的重复术语冲突，全部以未核验状态展示。可验证的规则从经过核验的文字与识别差异生成。每条规则至少需两组独立审核录音支持。验证比较留出 CER 和该候选规范词的 Entity F1。任何逐样本 CER 退化、实体 F1 下降或已拒绝记录都会阻止批准。规则需在至少两组受影响的留出录音上获得正收益。批准文件包含规则及留出摘要，仍需维护者核对术语来源、手动更新节目目录并通过 CI。更换来源、删除记录或记录过期都不会清除逻辑拒绝状态。
 
 用 `backup <path>` 生成一致的 SQLite 副本。该副本可直接作为新审核数据库迁移。用 `delete <id>` 删除一条记录，`compact` 回收已释放的 SQLite 页面。完整卸载审核数据时，停止服务后管理数据库及其副本。旧库自动迁移，原人工文本保留，完整训练和候选验证需要带音频摘要和来源的新记录。
 

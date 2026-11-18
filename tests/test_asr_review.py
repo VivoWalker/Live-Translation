@@ -9,7 +9,8 @@ import numpy as np
 from server.asr import Recognition
 from server.asr_agent import Action, Decision
 from server.asr_domain import Correction
-from server.asr_review import ReviewStore, candidates, load_holdout, pcm_sha256, reviewed_samples, training_index
+from server.asr_review import (ReviewStore, candidates, load_holdout, pcm_sha256, reviewed_samples, suggestions,
+                               training_index)
 
 BASELINE = "なつぞらたろうです。"
 REFERENCE = "夏空太郎です。"
@@ -65,6 +66,15 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(candidates(store.list(), store.blocked()), [])
         self.accept(store, self.record(store, "conflict", .1), "A", OTHER)
         self.assertEqual(reviewed_samples(store.list()), [])
+
+    def test_recurring_hypotheses_are_visible_only_as_unverified_suggestions(self):
+        store = ReviewStore(self.path)
+        for i, value in enumerate((.1, .1, .2)):
+            self.record(store, str(i), value)
+        found = suggestions(store.list())
+        self.assertTrue(found)
+        self.assertTrue(all(row["distinct_samples"] == 2 and not row["verified"] for row in found))
+        self.assertEqual(candidates(store.list(), store.blocked()), [])
 
     def test_holdout_rejects_audio_recording_and_text_leakage(self):
         store = ReviewStore(self.path)
