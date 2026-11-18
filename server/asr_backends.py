@@ -99,7 +99,7 @@ class QwenRecognizer(_LocalBackend):
     files = ("config.json", "preprocessor_config.json", "tokenizer_config.json")
     context_prompt = True
     default_cuda = "bfloat16"
-    precisions = {"cpu": ("float32",), "cuda": ("bfloat16", "float16", "float32")}
+    precisions = {"cpu": ("float32", "bfloat16"), "cuda": ("bfloat16", "float16", "float32")}
 
     def _load(self, path, device, precision, threads):
         import torch
