@@ -547,6 +547,10 @@
     const history = conversation.slice();
     conversation.push(Array.from(text).slice(0, TURN_LIMIT).join(''));
     if (conversation.length > contextTurns) conversation.shift();
+    if (!apiKey) {
+      emit({ type: 'translation_cancelled', id });
+      return;
+    }
     if (state.deliveries.size >= MAX_DELIVERIES) {
       add(state, 'overflows'); add(state, 'failures');
       emit({ type: 'error', scope: 'translate', id, code: 'translation_overflow', message: '翻译队列已满' });
@@ -579,7 +583,6 @@
     const { snapshot, queuedAt } = state.deliveries.get(id);
     try {
       if (performance.now() - queuedAt >= MAX_QUEUE_MS) throw new DOMException('queue timeout', 'AbortError');
-      if (!snapshot.apiKey) throw new Error('未填写 DeepSeek API Key');
       const result = await requestTranslation(snapshot, state, ticket);
       if (!validTranslation(ticket, state)) return;
       add(state, 'succeeded');
@@ -823,7 +826,8 @@
       const t0 = performance.now();
       setupWithModels(module, files);
       ready = started = true;
-      emit({ type: 'ready', initMs: Math.round(performance.now() - t0), domain: domainStatus() });
+      emit({ type: 'ready', initMs: Math.round(performance.now() - t0), domain: domainStatus(),
+        translator: apiKey ? 'deepseek' : 'disabled' });
     } catch (error) {
       if (epoch === generation) stop();
       throw error;

@@ -88,9 +88,29 @@ class SecurityTests(unittest.IsolatedAsyncioTestCase):
             config = await ws.receive_json()
             self.assertEqual(config["request_id"], 7)
             self.assertEqual(config["asr_mode"], "fast")
+            self.assertEqual(config["requested_mode"], "enhanced")
             self.assertFalse(config["agent"]["enabled"])
             self.assertEqual(config["domain"]["episode"], "初星学園HR")
             self.assertEqual(config["context_turns"], 3)
+
+    async def test_ready_and_configuration_distinguish_missing_secondary_and_audio_only(self):
+        self.state.agent_enabled = True
+        self.state.secondary_requested = "whisper"
+        self.state.secondary_state = "unavailable"
+        self.state.requested_asr = self.state.fallback_from = "parakeet"
+        self.state.translator = TranslationPipeline(create_translator("disabled"))
+        async with self.client.ws_connect(self.server.make_url('/ws')) as ws:
+            await ws.send_json({"type": "auth", "token": TOKEN})
+            ready = await ws.receive_json()
+            self.assertTrue(ready["config_ack"])
+            self.assertEqual((ready["asr_requested"], ready["asr"], ready["translator"]),
+                             ("parakeet", "sensevoice-int8", "disabled"))
+            self.assertEqual(ready["agent"]["secondary_state"], "unavailable")
+            self.assertFalse(ready["agent"]["verification_available"])
+            await ws.send_json({"type": "config", "mode": "enhanced", "agent": True, "request_id": 1})
+            ack = await ws.receive_json()
+            self.assertTrue(ack["agent"]["requested"])
+            self.assertFalse(ack["agent"]["verification_available"])
 
     async def test_wrong_token_or_audio_before_auth_closes(self):
         for first in ({'type': 'auth', 'token': 'wrong'}, {'type': 'config'}, None):

@@ -11,7 +11,7 @@ from .security import RateBudget
 
 _LIVE_BUDGETS = {"sensevoice": 450, "whisper-base": 550, "parakeet": 650,
                  "whisper-large": 750, "qwen3": 900}
-_OFFLINE_ONLY_CPU = ("whisper-large", "qwen3")
+_OFFLINE_ONLY_CPU = ("whisper-large", "whisper-turbo", "qwen3")
 
 
 def percentile(samples, fraction):
@@ -41,8 +41,12 @@ class VerificationPolicy:
             default = 60_000 if name.startswith("qwen3") else 30_000
             return cls(default if budget_ms is None else budget_ms, mode, 60)
         default = next((budget for prefix, budget in _LIVE_BUDGETS.items() if name.startswith(prefix)), 450)
-        allowed = budget_ms is not None or device != "cpu" or not name.startswith(_OFFLINE_ONLY_CPU)
+        allowed = cls.live_eligible(name, device, budget_ms)
         return cls(default if budget_ms is None else budget_ms, mode, cold_start_allowed=allowed)
+
+    @staticmethod
+    def live_eligible(name, device, budget_ms):
+        return budget_ms is not None or device != "cpu" or not name.startswith(_OFFLINE_ONLY_CPU)
 
 
 class VerificationController:

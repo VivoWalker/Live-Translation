@@ -26,11 +26,13 @@ async def run(args):
     dataset = load_dataset(args.manifest)
     review = ReviewStore(args.review) if args.review else None
     catalog = EpisodeCatalog(args.episode_catalog)
-    primary = create_recognizer(*args.model, num_threads=args.threads, device=args.device, asr_domain="off")
+    primary = create_recognizer(*args.model, num_threads=args.threads, device=args.device, asr_domain="off",
+                                precision=args.precision)
     scheduler = DecodeScheduler()
     verifiers = []
     for spec in args.secondary:
-        model = create_recognizer(*spec, num_threads=args.threads, device=args.secondary_device, asr_domain="off")
+        model = create_recognizer(*spec, num_threads=args.threads, device=args.secondary_device, asr_domain="off",
+                                  precision=args.secondary_precision)
         policy = VerificationPolicy.for_model(model, budget_ms=args.budget_ms, mode="offline")
         verifiers.append(OptimizationAgent(scheduler, model, controller=VerificationController(scheduler, policy)))
 
@@ -62,6 +64,8 @@ def main():
     parser.add_argument("--secondary", type=model_spec, action="append", required=True)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--secondary-device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--precision")
+    parser.add_argument("--secondary-precision")
     parser.add_argument("--threads", type=int, choices=range(1, 17), default=2)
     parser.add_argument("--budget-ms", type=int)
     parser.add_argument("--episode-catalog", type=Path)

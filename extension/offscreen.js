@@ -30,6 +30,31 @@ function domainNotice(domain) {
 function captureNotice(capture) {
   return [capture.notice, capture.domainNotice].filter(Boolean).join('。');
 }
+function serviceNotice(ready, config, settings) {
+  const name = String(ready.asr || '').slice(0, 80);
+  const mode = value => value === 'enhanced' ? '本地增强' : '本地快速';
+  const messages = [name && '实际识别模型 ' + name];
+  if (settings.mode && ready.asr_mode && settings.mode !== ready.asr_mode) {
+    messages.unshift('请求' + mode(settings.mode) + '，服务运行' + mode(ready.asr_mode));
+  }
+  if (ready.asr_fallback_from) messages.push('服务已从 ' + String(ready.asr_fallback_from).slice(0, 80) + ' 回退');
+  const agent = config?.agent || ready.agent;
+  if (settings.agent === false) messages.push('本次已关闭 Agent 复查');
+  else if (settings.agent || agent?.enabled) {
+    if (!agent?.enabled) messages.push('服务未启用 Agent 复查');
+    else if (agent.verification_available ?? Boolean(agent.secondary)) {
+      messages.push('Agent 复查可用（' + String(agent.secondary || '').slice(0, 80) + '）');
+    } else {
+      const reasons = { offline_preferred: '此复查模型默认离线运行', same_model: '复查需使用不同后端',
+        device_conflict: '服务最多使用一个 CUDA ASR 模型', not_configured: '未配置第二模型',
+        unavailable: '第二模型加载失败' };
+      messages.push('Agent 保留主识别结果（' + (Object.hasOwn(reasons, agent.secondary_state)
+        ? reasons[agent.secondary_state] : '第二模型不可用') + '）');
+    }
+  }
+  if (ready.translator === 'disabled') messages.push('翻译未启用，仅显示日语');
+  return messages.filter(Boolean).join('。');
+}
 async function dispose(capture) {
   if (!capture || capture.cancelled) return;
   capture.cancelled = true;
@@ -57,37 +82,46 @@ function connect(capture, url, target, token, settings) {
   return new Promise((resolve, reject) => {
     const sock = capture.ws = new WebSocket(url);
     sock.binaryType = 'arraybuffer';
-    let settled = false;
+    let settled = false, ready;
+    const configId = 1;
     const fail = error => {
       if (!settled) { settled = true; clearTimeout(timer); reject(error); }
     };
     const timer = setTimeout(() => { fail(new Error('字幕服务连接或认证超时')); sock.close(); }, 5000);
     capture.cancelConnect = () => fail(new DOMException('采集已取消', 'AbortError'));
+    function connected(config) {
+      if (settled) return;
+      settled = true; clearTimeout(timer);
+      capture.notice = serviceNotice(ready, config, settings);
+      report(capture, 'connected', captureNotice(capture));
+      resolve();
+    }
     sock.onopen = () => {
       if (!current(capture)) return sock.close();
-      sock.send(JSON.stringify({ type: 'auth', token }));
-      sock.send(JSON.stringify({ type: 'config', target, ...settings }));
+      try { sock.send(JSON.stringify({ type: 'auth', token })); }
+      catch { fail(new Error('无法连接字幕服务')); }
     };
     sock.onmessage = e => {
       if (!current(capture)) return;
       let msg;
       try { msg = JSON.parse(e.data); } catch { return; }
-      if (msg.type === 'ready' && !settled) {
-        settled = true; clearTimeout(timer);
-        const name = String(msg.asr || '').slice(0, 80);
-        const modeMismatch = settings.mode && msg.asr_mode && settings.mode !== msg.asr_mode;
-        const defaultMessage = name ? '本地识别模型 ' + name : '';
-        capture.notice = msg.asr_fallback_from ? '服务已回退到 ' + name
-          : modeMismatch ? (msg.asr_mode === 'fast' ? '服务当前提供本地快速模式' : '服务当前提供本地增强模式') + '（' + name + '）'
-            : defaultMessage;
-        if (settings.agent && !msg.agent?.enabled) capture.notice += '。服务未启用 Agent 复查';
-        report(capture, 'connected', '已连接字幕服务（' + msg.asr + ' / ' + msg.translator + '）');
-        resolve();
+      if (msg.type === 'ready' && !settled && !ready) {
+        ready = msg;
+        const config = { type: 'config', target, ...settings };
+        if (ready.config_ack === true) config.request_id = configId;
+        try { sock.send(JSON.stringify(config)); }
+        catch { fail(new Error('无法配置字幕服务')); return; }
+        if (ready.config_ack !== true) connected();
       }
       if (msg.type === 'stats') msg.client_buffered_bytes = sock.bufferedAmount || 0;
-      if (msg.type === 'config' && msg.domain) {
-        capture.domainNotice = domainNotice(msg.domain);
-        if (capture.capturing && !capture.congested) report(capture, 'capturing', captureNotice(capture));
+      if (msg.type === 'config' && msg.ok && ready && msg.target === target &&
+          (ready.config_ack !== true || msg.request_id === configId)) {
+        if (msg.domain) capture.domainNotice = domainNotice(msg.domain);
+        if (capture.capturing && !capture.congested) {
+          capture.notice = serviceNotice(ready, msg, settings);
+          report(capture, 'capturing', captureNotice(capture));
+        }
+        connected(msg);
       }
       send(capture, msg);
     };
@@ -158,7 +192,10 @@ async function start(msg) {
         if (!current(capture)) return;
         if (event.type === 'progress') report(capture, 'starting', event.message);
         else {
-          if (event.type === 'ready') capture.domainNotice = domainNotice(event.domain);
+          if (event.type === 'ready') {
+            capture.domainNotice = domainNotice(event.domain);
+            if (event.translator === 'disabled') capture.notice = '未配置 DeepSeek Key，仅显示日语';
+          }
           send(capture, event);
         }
       }, domainMode: msg.domainMode, domainFallback: msg.domainFallback, pageTitle: msg.pageTitle,

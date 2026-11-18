@@ -189,10 +189,6 @@ startButton.addEventListener('click', async () => {
     agent: browser ? undefined : agentMode.value === 'on' || agentMode.value === 'default' && engine.value === 'server-enhanced',
     allowRemote: !browser && allowRemote.checked,
   };
-  if (browser && !config.apiKey) {
-    focusRequiredField(apiKey, '请填写 DeepSeek API Key');
-    return;
-  }
   if (!browser && !config.serverToken) {
     focusRequiredField(serverToken, '请填写本地服务访问令牌');
     return;

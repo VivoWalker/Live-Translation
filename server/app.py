@@ -61,6 +61,7 @@ class AppState:
         access_token: str | None = None, allowed_hosts: set[str] | None = None, vad: VadSettings = VadSettings(),
         fallback_from: str | None = None, episodes: EpisodeCatalog | None = None,
         agent_enabled: bool = False, secondary: Recognizer | None = None, agent_budget_ms: int | None = None,
+        requested_asr: str | None = None, secondary_requested: str | None = None, secondary_state: str | None = None,
         review: ReviewStore | None = None,
         context_turns: int = 1, glossary: Glossary | None = None,
     ):
@@ -73,7 +74,12 @@ class AppState:
             self.verifier, VerificationPolicy.for_model(secondary, budget_ms=agent_budget_ms), primary=self.decoder)
         self.agent_enabled = agent_enabled
         self.asr_mode = getattr(asr, "mode", "fast")
+        self.requested_asr = requested_asr or asr.name
         self.secondary = secondary
+        self.secondary_requested = secondary_requested or (secondary.name if secondary else None)
+        self.secondary_state = secondary_state or (
+            ("ready" if self.verification.policy.cold_start_allowed else "offline_preferred") if secondary
+            else "unavailable" if self.secondary_requested else "not_configured")
         self.review = review
         self.context_turns = context_turns
         self.glossary = glossary or Glossary.load()
@@ -107,6 +113,14 @@ class AppState:
         if self.agent_enabled:
             return OptimizationAgent(self.verifier, self.secondary, controller=self.verification)
         return None
+
+    def agent_status(self, *, enabled=None, requested=None):
+        active = self.agent_enabled if enabled is None else enabled
+        return {"enabled": active, "requested": requested, "secondary_requested": self.secondary_requested,
+                "secondary": self.secondary.name if self.secondary else None,
+                "secondary_state": self.secondary_state if self.agent_enabled else "disabled",
+                "verification_available": active and self.secondary_state == "ready",
+                "budget_ms": self.verification.policy.budget_ms if active and self.secondary else None}
 
 
 STATE_KEY = web.AppKey("state", AppState)
@@ -186,8 +200,8 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 
         await ws.send_json({"type": "ready", "asr": state.asr.name, "translator": state.engine, "source": "ja", "target": "zh",
                             "asr_capabilities": state.capabilities, "asr_fallback_from": state.fallback_from,
-                            "asr_mode": state.asr_mode,
-                            "agent": {"enabled": state.agent_enabled, "secondary": state.secondary.name if state.secondary else None}})
+                            "asr_mode": state.asr_mode, "asr_requested": state.requested_asr, "config_ack": True,
+                            "agent": state.agent_status()})
         writer_task = asyncio.create_task(writer())
         audio_budget = RateBudget(128000, 256000)  # Up to 2x realtime, four-second burst.
         control_budget = RateBudget(20, 40)
@@ -233,7 +247,8 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                             session.set_agent(state.new_agent() if data["agent"] else None)
                         out.put({"type": "config", "ok": True, "target": target,
                                  "context_turns": cfg.context_turns,
-                                 "asr_mode": state.asr_mode, "agent": {"enabled": session.agent is not None},
+                                 "asr_mode": state.asr_mode, "requested_mode": mode,
+                                 "agent": state.agent_status(enabled=session.agent is not None, requested=data.get("agent")),
                                  **({"request_id": request_id} if request_id is not None else {}),
                                  **({"domain": domain.public()} if domain else {})})
                     elif kind == "ping":
@@ -281,6 +296,9 @@ async def health(request: web.Request) -> web.Response:
             "asr": state.asr.name,
             "asr_capabilities": state.capabilities,
             "asr_fallback_from": state.fallback_from,
+            "asr_mode": state.asr_mode,
+            "asr_requested": state.requested_asr,
+            "agent": state.agent_status(),
             "translator": state.engine,
             "sessions": state.sessions,
             "uptime_s": round(time.time() - state.started, 1),
@@ -405,6 +423,8 @@ def main() -> int:
     try:
         if args.agent_budget_ms is not None and not 100 <= args.agent_budget_ms <= 1500:
             raise ValueError("Agent budget must be between 100 and 1500 ms")
+        if args.agent_secondary is not None and args.agent_secondary not in PROVIDERS:
+            raise ValueError("Unknown secondary ASR backend")
         vad = VadSettings(args.vad_min_silence, args.vad_max_segment, args.vad_overlap)
         episodes = EpisodeCatalog(args.episode_catalog, fallback_packs=args.auto_domain_packs,
                                   general_fallback=args.auto_domain_general)
@@ -415,16 +435,27 @@ def main() -> int:
                                                fallback_dir=args.fallback_model_dir, allow_fallback=args.asr_fallback != "off")
     except (OSError, ValueError, BackendUnavailable) as exc:
         ap.error(str(exc))
-    secondary = review = None
+    secondary = secondary_state = review = None
     if args.agent and args.agent_secondary:
-        if args.agent_device == asr.capabilities.device == "cuda":
-            ap.error("Choose at most one CUDA ASR model per service")
-        try:
-            secondary = create_recognizer(args.agent_secondary, model_dir=args.agent_model_dir,
-                                          num_threads=min(args.threads, 2), asr_domain="off",
-                                          device=args.agent_device, precision=args.agent_precision)
-        except (OSError, ValueError, BackendUnavailable):
-            print(f"[jls] 无法加载复查模型 {args.agent_secondary}，保留主模型识别")
+        if args.agent_secondary == ("sensevoice" if fallback_from else args.asr):
+            secondary_state = "same_model"
+            print("[jls] 复查需使用不同的识别后端，已保留主模型识别")
+        elif args.agent_device == asr.capabilities.device == "cuda":
+            secondary_state = "device_conflict"
+            print("[jls] 本服务最多加载一个 CUDA ASR 模型，已保留主模型识别")
+        elif not VerificationPolicy.live_eligible(args.agent_secondary, args.agent_device, args.agent_budget_ms):
+            secondary_state = "offline_preferred"
+            print(f"[jls] {args.agent_secondary} CPU 复查默认使用离线工具，直播使用主模型")
+        else:
+            try:
+                torch_backends = ("parakeet", "qwen3-asr")
+                share_torch = (asr.capabilities.device == args.agent_device == "cpu"
+                               and args.asr in torch_backends and args.agent_secondary in torch_backends)
+                secondary = create_recognizer(args.agent_secondary, model_dir=args.agent_model_dir,
+                                              num_threads=args.threads if share_torch else min(args.threads, 2),
+                                              asr_domain="off", device=args.agent_device, precision=args.agent_precision)
+            except (OSError, ValueError, BackendUnavailable):
+                print(f"[jls] 无法加载复查模型 {args.agent_secondary}，保留主模型识别")
     if args.agent and args.agent_audit:
         try:
             review = ReviewStore(args.agent_audit)
@@ -439,6 +470,7 @@ def main() -> int:
     state = AppState(asr, translator, access_token=token,
                      allowed_hosts=LOCAL_HOSTS | set(args.allow_host), vad=vad, fallback_from=fallback_from,
                      episodes=episodes, agent_enabled=args.agent, secondary=secondary,
+                     requested_asr=args.asr, secondary_requested=args.agent_secondary, secondary_state=secondary_state,
                      agent_budget_ms=args.agent_budget_ms, review=review, context_turns=args.context_turns,
                      glossary=glossary)
     active_packs = ("custom" if selection != "off" else "off") if args.asr_terms else ",".join(normalize_packs(selection)) or "off"

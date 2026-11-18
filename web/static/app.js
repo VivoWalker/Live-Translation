@@ -120,6 +120,7 @@
         || message.scope === 'translate')) return;
     switch (message.type) {
       case 'ready':
+        session.supportsConfigId = message.config_ack === true;
         $('engine').textContent = message.asr + ' / ' + message.translator;
         $('stats').textContent = '0 句';
         $('latency').textContent = '—';
@@ -158,7 +159,8 @@
         break;
       case 'config': {
         const pending = session.pendingConfig;
-        if (pending && message.ok && (message.request_id ?? pending.id) === pending.id && message.target === pending.target) {
+        const ack = message.request_id ?? (session.supportsConfigId ? null : pending?.id);
+        if (pending && message.ok && ack === pending.id && message.target === pending.target) {
           session.pendingConfig = null;
           session.hasCaption = false;
           captions.clear();
