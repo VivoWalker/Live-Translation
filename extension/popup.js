@@ -7,11 +7,14 @@ const startButton = $('start');
 const stopButton = $('stop');
 const engine = $('engine');
 const target = $('target');
-const domain = $('asr-domain');
+const domainField = $('asr-domain-field');
+const packIds = JLSASRDomain.packs;
+const packInput = id => $('asr-pack-' + id);
+const selectedPacks = () => packIds.filter(id => packInput(id).checked);
 const apiKey = $('apikey');
 const server = $('server');
 const serverToken = $('server-token');
-const sessionFields = [engine, target, domain, apiKey, server, serverToken];
+const sessionFields = [engine, target, apiKey, server, serverToken];
 let activeTab, phase = 'idle', operation = 0, ready = false, cacheInfo;
 let prefs = JLS.captionPreferences();
 const preview = JLS.createCaptionPreview($('caption-preview'), { compact: true });
@@ -52,6 +55,7 @@ function setPhase(next, message) {
   stopButton.hidden = !active;
   stopButton.disabled = phase === 'stopping';
   for (const field of sessionFields) field.disabled = active;
+  domainField.disabled = active;
   showMessage(message, phase === 'error');
 }
 
@@ -91,7 +95,7 @@ function focusRequiredField(field, message) {
 async function init() {
   const [[tab], store, capture] = await Promise.all([
     chrome.tabs.query({ active: true, currentWindow: true }),
-    chrome.storage.local.get(['jlsTarget', 'jlsServer', 'jlsEngine', 'jlsApiKey', 'jlsServerToken', 'jlsModelCache', 'jlsAsrDomain', 'jlsCaptionPrefs']),
+    chrome.storage.local.get(['jlsTarget', 'jlsServer', 'jlsEngine', 'jlsApiKey', 'jlsServerToken', 'jlsModelCache', 'jlsAsrDomain', 'jlsAsrPacks', 'jlsCaptionPrefs']),
     chrome.runtime.sendMessage({ type: 'jls:query' }).catch(() => null),
   ]);
   activeTab = tab;
@@ -102,7 +106,9 @@ async function init() {
   server.value = store.jlsServer || DEFAULT_SERVER;
   apiKey.value = store.jlsApiKey || '';
   serverToken.value = store.jlsServerToken || '';
-  domain.value = ['off', 'anime', 'gakumas'].includes(store.jlsAsrDomain) ? store.jlsAsrDomain : 'gakumas';
+  let enabled = packIds;
+  try { enabled = JLSASRDomain.normalizePacks(store.jlsAsrPacks ?? store.jlsAsrDomain); } catch {}
+  for (const id of packIds) packInput(id).checked = enabled.includes(id);
   cacheInfo = store.jlsModelCache;
   applySettings(store.jlsCaptionPrefs);
   renderFields();
@@ -121,7 +127,10 @@ async function init() {
     }
   });
 
-  const keys = ['jlsEngine', 'jlsTarget', 'jlsAsrDomain', 'jlsApiKey', 'jlsServer', 'jlsServerToken'];
+  domainField.addEventListener('change', () => {
+    chrome.storage.local.set({ jlsAsrPacks: selectedPacks() }).catch(() => {});
+  });
+  const keys = ['jlsEngine', 'jlsTarget', 'jlsApiKey', 'jlsServer', 'jlsServerToken'];
   sessionFields.forEach((field, index) => field.addEventListener('change', () => {
     chrome.storage.local.set({ [keys[index]]: field.value.trim() }).catch(() => {});
     if (field === engine) renderFields();
@@ -138,7 +147,7 @@ startButton.addEventListener('click', async () => {
   }
   const browser = engine.value === 'browser';
   const config = {
-    tabId: activeTab.id, target: target.value, engine: engine.value, asrDomain: domain.value,
+    tabId: activeTab.id, target: target.value, engine: engine.value, asrPacks: selectedPacks(),
     serverUrl: server.value.trim() || DEFAULT_SERVER, apiKey: apiKey.value.trim(), serverToken: serverToken.value.trim(),
   };
   if (browser && !config.apiKey) {
@@ -164,7 +173,7 @@ startButton.addEventListener('click', async () => {
     const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: config.tabId });
     if (ticket !== operation) return;
     // Autofilled credentials and values entered immediately before the click also persist.
-    chrome.storage.local.set({ jlsEngine: config.engine, jlsTarget: config.target, jlsAsrDomain: config.asrDomain,
+    chrome.storage.local.set({ jlsEngine: config.engine, jlsTarget: config.target, jlsAsrPacks: config.asrPacks,
       jlsApiKey: config.apiKey, jlsServer: config.serverUrl, jlsServerToken: config.serverToken }).catch(() => {});
     const response = await chrome.runtime.sendMessage({ type: 'jls:start', streamId, ...config });
     if (ticket !== operation) return;

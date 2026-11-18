@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { createReadStream, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { createReadStream, existsSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -27,7 +27,8 @@ const modelRoot = existsSync(resolve('models/sensevoice-onnx/model.int8.onnx')) 
 const files = new Map([
   ['/ext-assets/asr-engine.js', resolve('extension/asr-engine.js')],
   ['/ext-assets/asr-domain.js', resolve('extension/asr-domain.js')],
-  ['/ext-assets/asr-terms.json', resolve('extension/asr-terms.json')],
+  ...readdirSync('extension/asr-terms').filter(name => name.endsWith('.json'))
+    .map(name => [`/ext-assets/asr-terms/${name}`, resolve('extension/asr-terms', name)]),
   ['/models/model.int8.onnx', join(modelRoot, 'sensevoice-onnx/model.int8.onnx')],
   ['/models/tokens.txt', join(modelRoot, 'sensevoice-onnx/tokens.txt')],
   ['/models/silero_vad.onnx', join(modelRoot, 'silero/silero_vad.onnx')],
@@ -36,7 +37,7 @@ const files = new Map([
     .map(name => ['/ext-assets/wasm/' + name, resolve('extension/wasm', name)]),
 ]);
 if (WASM) for (const file of files.values()) assert(existsSync(file), 'Missing real-model fixture: ' + file);
-const popupFiles = new Set(['popup.html', 'popup.css', 'interface.css', 'caption-settings.js', 'popup.js']);
+const popupFiles = new Set(['popup.html', 'popup.css', 'interface.css', 'caption-settings.js', 'asr-domain.js', 'popup.js']);
 const profile = mkdtempSync(join(tmpdir(), 'jls-content-'));
 const server = createServer((req, res) => {
   const popupFile = req.url.startsWith('/popup/') && req.url.slice('/popup/'.length);
@@ -109,7 +110,10 @@ async function memorySnapshot(label) {
 async function checkPopupSizing() {
   const stub = await call('Page.addScriptToEvaluateOnNewDocument', { source: `window.chrome = {
     tabs: { query: async () => [{ id: 1, title: '字幕弹窗尺寸测试', url: 'https://example.invalid' }] },
-    storage: { local: { get: async () => ({}) }, session: { get: async () => ({}) }, onChanged: { addListener() {} } },
+    storage: { local: {
+      get: async () => ({ jlsAsrDomain: 'off', ...JSON.parse(sessionStorage.getItem('popup-prefs') || '{}') }),
+      set: async values => sessionStorage.setItem('popup-prefs', JSON.stringify(values)),
+    }, session: { get: async () => ({}) }, onChanged: { addListener() {} } },
     runtime: { sendMessage: async () => ({ running: false }) },
   };` });
   try {
@@ -125,6 +129,12 @@ async function checkPopupSizing() {
       const width = await evaluate('document.documentElement.scrollWidth');
       assert(width >= 380 && width <= 420, 'popup must request its width from the initial viewport, got ' + width);
       await call('Emulation.setDeviceMetricsOverride', { width, height: 580, deviceScaleFactor: scale, mobile: false });
+      const boxes = () => evaluate(`Array.from(document.querySelectorAll('#asr-domain-field input:checked'), input => input.id)`);
+      assert.deepEqual(await boxes(), scale === 1 ? [] : ['asr-pack-mashiro']);
+      if (scale === 1) {
+        await evaluate(`document.querySelector('#asr-pack-mashiro').click()`);
+        assert.deepEqual(await boxes(), ['asr-pack-mashiro']);
+      }
       const layout = await evaluate(`(() => {
         const heading = document.querySelector('.popup-header h1');
         document.querySelector('#caption-tab').click();
@@ -139,6 +149,7 @@ async function checkPopupSizing() {
     await call('Page.removeScriptToEvaluateOnNewDocument', stub);
   }
   checks.push('popup requests its full width from a small initial viewport at 1× and 1.5× and keeps its footer visible');
+  checks.push('popup migrates the former off setting and restores an individually selected word pack');
 }
 async function stressCaptions() {
   await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });

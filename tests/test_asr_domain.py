@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 
 from server.asr import SAMPLE_RATE, SenseVoiceRecognizer, WhisperRecognizer
-from server.asr_domain import BUILTIN, DomainCorrector
+from server.asr_domain import BUILTIN, PACKS, DomainCorrector
 
 CASES = json.loads((Path(__file__).parent / 'fixtures/asr_domain_cases.json').read_text())
 
@@ -21,29 +21,45 @@ class DomainTests(unittest.TestCase):
                 self.assertEqual(corrector.correct(raw), expected)
                 self.assertEqual(corrector.correct(expected), expected)
 
-    def test_off_and_general_profiles_are_separate(self):
-        off, anime = DomainCorrector('off'), DomainCorrector('anime')
+    def test_independent_packs_and_legacy_selections_work(self):
+        off, anime = DomainCorrector([]), DomainCorrector('anime')
         for raw, _ in CASES:
             self.assertEqual(off.correct(raw), raw)
         self.assertEqual(anime.correct('秦谷みすずの曲キャンパスモード'), '秦谷みすずの曲キャンパスモード')
         self.assertEqual(anime.correct('日高真白さんと羊宮ひなさん'), '陽高真白さんと羊宮妃那さん')
+        sample = '日高真白と十王せな、秦谷みすず、羊宮ひな、逢田りかこ、みなせいのり'
+        for packs, expected in [
+            (['mashiro'], '陽高真白と十王星南、秦谷みすず、羊宮ひな、逢田りかこ、みなせいのり'),
+            (['gakumas'], '日高真白と十王星南、秦谷美鈴、羊宮ひな、逢田りかこ、みなせいのり'),
+            (['lovelive', 'bandori'], '日高真白と十王せな、秦谷みすず、羊宮妃那、逢田梨香子、みなせいのり'),
+            (['general'], '日高真白と十王せな、秦谷みすず、羊宮ひな、逢田りかこ、水瀬いのり'),
+        ]:
+            self.assertEqual(DomainCorrector(packs).correct(sample), expected)
+        with self.assertRaisesRegex(ValueError, 'Unknown'):
+            DomainCorrector(['unknown'])
 
     def test_all_aliases_have_unambiguous_canonical_output(self):
-        data, corrector = json.loads(BUILTIN.read_text()), DomainCorrector()
-        for entry in data['entries']:
-            for alias in entry['aliases']:
-                cue = data['cues'][entry['requires'][0]][0] + '、' if entry.get('requires') else ''
-                with self.subTest(alias=alias):
-                    self.assertEqual(corrector.correct(cue + alias), cue + entry['term'])
+        for pack in PACKS:
+            data = json.loads((BUILTIN / f'{pack}.json').read_text())
+            corrector = DomainCorrector([pack])
+            for entry in data['entries']:
+                for alias in entry['aliases']:
+                    text, requires = (alias, entry.get('requires')) if isinstance(alias, str) else (alias['text'], alias.get('requires', entry.get('requires')))
+                    cue = data['cues'][requires[0]][0] + '、' if requires else ''
+                    with self.subTest(pack=pack, alias=text):
+                        self.assertEqual(corrector.correct(cue + text), cue + entry['term'])
 
     def test_custom_file_validates_size_schema_and_alias_conflicts(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'terms.json'
             path.write_bytes(b' ' * (256 * 1024 + 1))
             with self.assertRaisesRegex(ValueError, 'too large'): DomainCorrector(path=path)
-            data = json.loads(BUILTIN.read_text())
-            for bad in [None, {**data, 'version': 2}, {**data, 'entries': data['entries'] * 10},
+            data = json.loads((BUILTIN / 'mashiro.json').read_text())
+            for bad in [None, {**data, 'version': 2}, {**data, 'entries': [data['entries'][0]] * 501},
                         {'version': 1, 'cues': {}, 'entries': [{'term': '名前', 'scope': 'common', 'aliases': ['短']}]},
+                        {'version': 1, 'cues': {'cue': ['話題']}, 'entries': [
+                            {'term': '名前', 'aliases': [{'text': 'ABC', 'requires': ['cue'], 'katakanaBoundary': True}]},
+                        ]},
                         {**data, 'entries': [data['entries'][0], data['entries'][0]]}]:
                 path.write_text(json.dumps(bad))
                 with self.assertRaises(ValueError): DomainCorrector(path=path)
@@ -56,6 +72,17 @@ class DomainTests(unittest.TestCase):
             self.assertEqual(corrector.correct('ABC DEF、ABCD、ABCです。正式名'), '正式名、ABCD、正式名です。正式名')
             self.assertEqual(corrector.correct('a' * 8000), 'a' * 8000)
             self.assertEqual(corrector.correct('(a+)+$'), '正しい名前')
+
+    def test_alias_context_overrides_entry_and_cannot_cross_match_or_sentence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'terms.json'
+            path.write_text(json.dumps({'version': 1, 'cues': {'default': ['話題'], 'narrow': ['特集']}, 'entries': [
+                {'term': '標準名', 'aliases': ['別名', {'text': '略名', 'requires': ['narrow']}], 'requires': ['default']},
+            ]}))
+            corrector = DomainCorrector(path=path)
+            self.assertEqual(corrector.correct('話題は別名、略名です。'), '話題は標準名、略名です。')
+            self.assertEqual(corrector.correct('略名の特集'), '標準名の特集')
+            self.assertEqual(corrector.correct('特略名集。特集。略名です。'), '特略名集。特集。略名です。')
 
     def test_correction_has_no_previous_sentence_state_and_bounds_input(self):
         corrector = DomainCorrector()

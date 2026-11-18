@@ -26,7 +26,7 @@ Chrome / Edge 扩展
 extension/                  Manifest V3 扩展与浏览器识别引擎
 ├── asr-engine.js           WASM 生命周期、分段、翻译与会话状态
 ├── asr-domain.js           本地专名纠错实现
-├── asr-terms.json          浏览器 / Python 共用词表
+├── asr-terms/              浏览器与 Python 共用的专名词库
 ├── caption-overlay.js      扩展 / 演示页共用字幕层
 ├── caption-settings.js     字幕设置校验、预设、预览与控件
 └── wasm/                   第三方 sherpa-onnx 运行时

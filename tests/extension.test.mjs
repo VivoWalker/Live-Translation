@@ -10,7 +10,7 @@ const deferred = () => { let resolve; const promise = new Promise(r => { resolve
 const extensionId = 'a'.repeat(32);
 const extensionURL = path => `chrome-extension://${extensionId}/${path}`;
 function loadBackground(sandbox) {
-  sandbox.importScripts = file => vm.runInContext(read(file), sandbox);
+  sandbox.importScripts = (...files) => { for (const file of files) vm.runInContext(read(file), sandbox); };
   vm.runInContext(read('background.js'), sandbox);
 }
 function dispatch(listener, message, page = 'background.js') {
@@ -140,9 +140,14 @@ function engine({ runtimeReady = true, runtimeFailure = false, setupFailure = fa
     setTimeout: (fn, delay) => setTimeout(fn, delay === 12000 && requestTimeoutMs !== undefined ? requestTimeoutMs : delay), clearTimeout,
     navigator: { storage: { persist: async () => true } },
     caches: cache || { open: async () => ({ match: async () => null, put: async () => {} }) },
-    fetch: (url, options) => String(url).endsWith('/asr-terms.json')
-      ? domainFetcher ? domainFetcher() : Promise.resolve(new Response(read('asr-terms.json')))
-      : fetcher ? fetcher(url, options) : (() => { const request = deferred(); requests.push({ ...request, url, options }); return request.promise; })(),
+    fetch(url, options) {
+      const pack = String(url).match(/\/asr-terms\/([a-z]+\.json)$/)?.[1];
+      if (pack) return domainFetcher && pack === 'mashiro.json' ? domainFetcher() : Promise.resolve(new Response(read('asr-terms/' + pack)));
+      if (fetcher) return fetcher(url, options);
+      const request = deferred();
+      requests.push({ ...request, url, options });
+      return request.promise;
+    },
     createVad: () => ({ free() {}, acceptWaveform() {}, isDetected: () => speech, isEmpty: () => false, front: () => vadSegment, pop() {} }),
     OfflineRecognizer: class {
       constructor(config) {
@@ -475,7 +480,7 @@ test('background forwards mode/keys and refuses stale or spoofed events', async 
   assert.equal((await dispatch(listener, message, 'popup.html')).ok, true);
   const first = sent.find(m => m.type === 'jls:offscreen-start');
   assert.equal(first.engine, 'server'); assert.equal(first.apiKey, 'sk-fake'); assert.equal(first.serverToken, 'token');
-  assert.equal(first.asrDomain, 'anime');
+  assert.deepEqual(Array.from(first.asrPacks), ['mashiro', 'bandori', 'lovelive', 'general']);
   await dispatch(listener, { ...message, tabId: 2 }, 'popup.html');
   painted.length = 0;
   await dispatch(listener, { type: 'jls:event', sessionId: first.sessionId, event: { text: 'private' } }, 'offscreen.html');
@@ -509,7 +514,7 @@ test('background forwards mode/keys and refuses stale or spoofed events', async 
 
 test('browser-mode popup starts without fetching a local service', async () => {
   let calls = 0;
-  const sent = [], elements = new Map();
+  const sent = [], elements = new Map(), saved = {};
   const element = id => {
     if (!elements.has(id)) elements.set(id, { value: '', className: '', dataset: {}, addEventListener(name, fn) { this[name] = fn; } });
     return elements.get(id);
@@ -519,7 +524,7 @@ test('browser-mode popup starts without fetching a local service', async () => {
     fetch: async () => { calls++; throw new Error('No local service'); },
     chrome: {
       tabs: { query: async () => [{ id: 1, url: 'https://video.test', title: 'test' }] },
-      storage: { local: { get: async () => ({ jlsEngine: 'browser', jlsApiKey: 'sk-fake', jlsModelCache: { saved: false, warning: true, message: '模型未保存' } }), set: async () => {} }, session: { get: async () => ({}) }, onChanged: { addListener() {} } },
+      storage: { local: { get: async () => ({ jlsEngine: 'browser', jlsApiKey: 'sk-fake', jlsAsrDomain: 'off', jlsModelCache: { saved: false, warning: true, message: '模型未保存' } }), set: async values => Object.assign(saved, values) }, session: { get: async () => ({}) }, onChanged: { addListener() {} } },
       runtime: { sendMessage: async m => { sent.push(m); return m.type === 'jls:query' ? { running: false } : { ok: true }; } },
       tabCapture: { getMediaStreamId: async () => 'mock' },
     },
@@ -527,14 +532,20 @@ test('browser-mode popup starts without fetching a local service', async () => {
   vm.runInContext(read('caption-settings.js'), sandbox);
   sandbox.JLS.createCaptionEditor = () => ({ update() {} });
   sandbox.JLS.createCaptionPreview = () => ({ update() {} });
+  vm.runInContext(read('asr-domain.js'), sandbox);
   vm.runInContext(read('popup.js'), sandbox);
   await tick();
   assert.equal(element('model-cache-status').textContent, '模型未保存');
   assert.equal(element('model-cache-status').className, 'model-cache warning');
+  assert.equal(element('asr-pack-mashiro').checked, false);
+  assert.equal(element('asr-pack-gakumas').checked, false);
+  element('asr-pack-mashiro').checked = true;
+  element('asr-domain-field').change();
+  assert.deepEqual(Array.from(saved.jlsAsrPacks), ['mashiro']);
   await element('start').click();
   assert.equal(calls, 0);
   assert.equal(sent.find(m => m.type === 'jls:start').engine, 'browser');
-  assert.equal(sent.find(m => m.type === 'jls:start').asrDomain, 'gakumas');
+  assert.deepEqual(Array.from(sent.find(m => m.type === 'jls:start').asrPacks), ['mashiro']);
 });
 
 test('content scripts can persist only public caption preferences through the background', async () => {
@@ -778,7 +789,7 @@ test('changing ASR domain cancels old translation and starts with clean context 
   const context = engine(); await context.api.init(context.config);
   try {
     context.hypothesis('日高真白さん'); context.utterance(); await tick();
-    context.api.setConfig({ asrDomain: 'off' });
+    context.api.setConfig({ asrPacks: [] });
     assert.equal(context.requests[0].options.signal.aborted, true);
     context.requests[0].resolve(successfulReply('old')); await tick();
     assert.equal(context.events.filter(event => event.type === 'translation').length, 0);
@@ -786,11 +797,11 @@ test('changing ASR domain cancels old translation and starts with clean context 
     assert.equal(context.events.filter(event => event.type === 'final').at(-1).text, '日高真白さん');
     const user = JSON.parse(JSON.parse(context.requests.at(-1).options.body).messages[1].content);
     assert.deepEqual(user, { previous: '', current: '日高真白さん' });
-    assert.equal(context.api.stats().asr_domain, 'off');
-    assert.throws(() => context.api.setConfig({ asrDomain: 'unknown' }), /未知/);
-    await context.api.init(context.config);
-    await translatedUtterance(context, '日高真白さん');
-    assert.equal(context.events.filter(event => event.type === 'final').at(-1).text, '陽高真白さん');
+    assert.deepEqual(Array.from(context.api.stats().asr_packs), []);
+    assert.throws(() => context.api.setConfig({ asrPacks: ['unknown'] }), /未知/);
+    await context.api.init({ ...context.config, asrPacks: ['mashiro'] });
+    await translatedUtterance(context, '日高真白さんと秦谷みすず');
+    assert.equal(context.events.filter(event => event.type === 'final').at(-1).text, '陽高真白さんと秦谷みすず');
   } finally { context.api.stop(); }
 });
 
@@ -805,7 +816,7 @@ test('a failed lexicon load can retry and stopping during the load cannot publis
   const pending = context.api.init(context.config);
   const cancelled = assert.rejects(pending, { name: 'AbortError' });
   await tick(); context.api.stop();
-  loaded.resolve(new Response(read('asr-terms.json')));
+  loaded.resolve(new Response(read('asr-terms/mashiro.json')));
   await cancelled;
   assert.equal(context.events.some(event => event.type === 'ready'), false);
   await context.api.init(context.config);

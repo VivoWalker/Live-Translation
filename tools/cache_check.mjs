@@ -5,7 +5,7 @@
  */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { createReadStream, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { createReadStream, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -23,6 +23,8 @@ const engine = readFileSync(join(root, 'extension/asr-engine.js'), 'utf8');
 const urls = [...engine.matchAll(/url: '([^']+)'/g)].map(match => match[1]);
 assert.equal(urls.length, 3);
 const profile = mkdtempSync(join(tmpdir(), 'jls-cache-restart-'));
+const packPaths = new Set(readdirSync(join(root, 'extension/asr-terms')).filter(name => name.endsWith('.json'))
+  .map(name => '/asr-terms/' + name));
 const chrome = process.env.JLS_CHROME || (process.platform === 'win32' ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' : 'chromium');
 let downloads = 0;
 const server = createServer((request, response) => {
@@ -37,7 +39,7 @@ const server = createServer((request, response) => {
     source.pipe(response);
   } else if (request.url === '/engine.js') {
     response.setHeader('Content-Type', 'application/javascript; charset=utf-8'); response.end(engine);
-  } else if (request.url === '/asr-domain.js' || request.url === '/asr-terms.json') {
+  } else if (request.url === '/asr-domain.js' || packPaths.has(request.url)) {
     const type = request.url.endsWith('.json') ? 'application/json' : 'application/javascript';
     response.setHeader('Content-Type', type + '; charset=utf-8');
     response.end(readFileSync(join(root, 'extension', request.url.slice(1))));

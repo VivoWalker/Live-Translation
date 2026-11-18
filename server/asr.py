@@ -135,7 +135,7 @@ class SenseVoiceRecognizer(_OfflineRecognizer):
     min_partial_speech = 0.9
 
     def __init__(self, model_dir: str | None = None, language: str = "ja", num_threads: int = 4,
-                 asr_domain: str = "gakumas", asr_terms: str | None = None):
+                 asr_domain: str | list[str] = "gakumas", asr_terms: str | None = None):
         self.domain = DomainCorrector(asr_domain, asr_terms)
         model_dir = resolve_model_dir(model_dir)
         self.model_dir = model_dir
@@ -158,7 +158,7 @@ class WhisperRecognizer(_OfflineRecognizer):
     min_partial_speech = 2.0
 
     def __init__(self, model_dir: str | None = None, language: str = "ja", num_threads: int = 4,
-                 asr_domain: str = "gakumas", asr_terms: str | None = None):
+                 asr_domain: str | list[str] = "gakumas", asr_terms: str | None = None):
         self.domain = DomainCorrector(asr_domain, asr_terms)
         directory, prefix = resolve_whisper_model(model_dir)
         self.model_dir = str(directory)
@@ -179,7 +179,7 @@ class WhisperRecognizer(_OfflineRecognizer):
 
 def create_recognizer(engine: str = "sensevoice", model_dir: str | None = None,
                       language: str = "ja", num_threads: int = 4,
-                      asr_domain: str = "gakumas", asr_terms: str | None = None) -> Recognizer:
+                      asr_domain: str | list[str] = "gakumas", asr_terms: str | None = None) -> Recognizer:
     if num_threads < 1:
         raise ValueError("ASR threads must be at least 1")
     backends = {"sensevoice": SenseVoiceRecognizer, "whisper": WhisperRecognizer}

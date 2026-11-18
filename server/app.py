@@ -34,6 +34,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from server.asr import Recognizer, create_recognizer  # noqa: E402
+from server.asr_domain import PACKS, PROFILES, normalize_packs  # noqa: E402
 from server.streaming import SessionConfig, StreamSession  # noqa: E402
 from server.translate import TranslationPipeline, create_translator  # noqa: E402
 from server.security import (  # noqa: E402
@@ -268,22 +269,29 @@ def main() -> int:
     ap.add_argument("--asr", choices=("sensevoice", "whisper"),
                     default=os.environ.get("JLSUBS_ASR", cfg.get("asr", "sensevoice")),
                     help="Local recognition backend (default: sensevoice)")
-    ap.add_argument("--asr-domain", choices=("off", "anime", "gakumas"),
-                    default=cfg.get("asr_domain", "gakumas"), help="Local ASR spelling lexicon")
+    lexicon = ap.add_mutually_exclusive_group()
+    lexicon.add_argument("--asr-packs", choices=PACKS, nargs="*", help="Enable named ASR word packs; no names disables all packs")
+    lexicon.add_argument("--asr-domain", choices=PROFILES, help="Legacy ASR lexicon profile")
     ap.add_argument("--asr-terms", default=cfg.get("asr_terms"), help="Custom ASR lexicon JSON, replaces built-in terms")
     ap.add_argument("--dev-assets", action="store_true", help="Expose non-secret development test pages")
     ap.add_argument("--allow-host", action="append", default=[], help="Additional trusted HTTP hostname (no scheme or port)")
     args = ap.parse_args()
+    selection = args.asr_packs if args.asr_packs is not None else args.asr_domain
+    if selection is None:
+        selection = cfg.get("asr_domain", "gakumas")
+        if args.asr_terms is None:
+            selection = cfg.get("asr_packs", selection)
 
     api_key = os.environ.get("DEEPSEEK_API_KEY") or cfg.get("deepseek_api_key")
     try:
         asr = create_recognizer(args.asr, model_dir=args.model_dir, language="ja", num_threads=args.threads,
-                                asr_domain=args.asr_domain, asr_terms=args.asr_terms)
+                                asr_domain=selection, asr_terms=args.asr_terms)
     except (OSError, ValueError) as exc:
         ap.error(str(exc))
     translator = TranslationPipeline(create_translator(args.translator, api_key))
     state = AppState(asr, translator, access_token=os.environ.get("JLSUBS_ACCESS_TOKEN") or cfg.get("access_token"), allowed_hosts=LOCAL_HOSTS | set(args.allow_host))
-    print(f"[jls] asr={asr.name} threads={args.threads} asr_domain={args.asr_domain} translator={translator.engine}")
+    active_packs = ("custom" if selection != "off" else "off") if args.asr_terms else ",".join(normalize_packs(selection)) or "off"
+    print(f"[jls] asr={asr.name} threads={args.threads} asr_packs={active_packs} translator={translator.engine}")
     if translator.engine == "deepseek":
         print(f"[jls] deepseek model={os.environ.get('DEEPSEEK_MODEL', 'deepseek-chat')}")
     elif translator.engine == "google-public":
