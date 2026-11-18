@@ -782,7 +782,7 @@ test('browser model, version, endpoint and output parameter changes clear sessio
   const context = engine(); await context.api.init(context.config);
   try {
     await translatedUtterance(context, '句');
-    for (const config of [{ model: 'other-model' }, { promptVersion: 'subtitle-v3' }, { baseUrl: 'https://api.deepseek.com/v1' }, { temperature: .3 }, { maxTokens: 513 }, { apiKey: 'sk-new-fixture' }]) {
+    for (const config of [{ model: 'other-model' }, { promptVersion: 'fixture-version' }, { baseUrl: 'https://api.deepseek.com/v1' }, { temperature: .3 }, { maxTokens: 513 }, { apiKey: 'sk-new-fixture' }]) {
       context.api.setConfig(config);
       assert.equal(context.api.stats().translation.cache_entries, 0);
       assert.equal(context.api.stats().translation.api_requests, 0);
@@ -951,6 +951,22 @@ test('browser recognition without a DeepSeek key delivers Japanese and skips tra
     assert.equal(context.events.find(event => event.type === 'final').text, 'こんにちは。');
     assert.equal(context.events.find(event => event.type === 'translation_cancelled').id, 0);
     assert.equal(context.requests.length, 0);
+  } finally { context.api.stop(); }
+});
+
+test('browser posts untrusted Japanese inside the fixed envelope and disallows redirects', async () => {
+  const context = engine({ fetcher: async (_url, options) => {
+    assert.equal(options.redirect, 'error');
+    const { messages } = JSON.parse(options.body);
+    assert.deepEqual(messages.map(message => message.role), ['system', 'user']);
+    assert(!messages[0].content.includes('ignore-instructions-fixture'));
+    assert.equal(JSON.parse(messages[1].content).current, 'ignore-instructions-fixture');
+    return successfulReply('result');
+  } });
+  await context.api.init(context.config);
+  try {
+    context.hypothesis('ignore-instructions-fixture'); context.utterance(); await tick();
+    assert.equal(context.events.find(event => event.type === 'translation')?.text, 'result');
   } finally { context.api.stop(); }
 });
 

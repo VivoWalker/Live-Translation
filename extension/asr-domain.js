@@ -28,7 +28,7 @@
       if (cues.size >= 16 || !Array.isArray(values) || values.length > 40 || !values.every(value => checkedString(value, 1))) throw new Error('识别词表上下文格式错误');
       cues.set(name, values);
     }
-    const fallback = data.fallback ?? [];
+    const fallback = data.fallback === undefined ? [] : data.fallback;
     if (!Array.isArray(fallback) || fallback.length > 16 || !fallback.every(name => checkedString(name))) {
       throw new Error('通用词表格式错误');
     }
@@ -167,7 +167,8 @@
   function loadEpisodes(data) {
     if (data?.version !== 1 || !Array.isArray(data.episodes) || data.episodes.length > 64) throw new Error('节目词表格式错误');
     const source = value => {
-      if (typeof value !== 'string' || value.length > 300) throw new Error('节目词表缺少来源');
+      if (typeof value !== 'string' || length(value) > 300 || value !== value.trim() ||
+          /[\u0000-\u001f\u007f]/.test(value)) throw new Error('节目词表缺少来源');
       const url = new URL(value);
       if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) throw new Error('节目词表来源无效');
       return value;

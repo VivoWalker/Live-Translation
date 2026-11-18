@@ -17,7 +17,9 @@ const getArg = (name, def) => {
   const i = argv.indexOf('--' + name);
   return i >= 0 && argv[i + 1] ? argv[i + 1] : def;
 };
-const PAGE_URL = getArg('url', 'http://127.0.0.1:8765/?autostart=file');
+const PAGE_URL = new URL(getArg('url', 'http://127.0.0.1:8765/?autostart=file'));
+if (!['http:', 'https:'].includes(PAGE_URL.protocol) || !['127.0.0.1', 'localhost', '[::1]'].includes(PAGE_URL.hostname)
+    || PAGE_URL.username || PAGE_URL.password) throw new Error('Use a loopback demo URL without credentials');
 const SECONDS = Number(getArg('seconds', '16'));
 const SWITCH_LANGUAGE = argv.includes('--switch-language');
 const RESTART = argv.includes('--restart');
@@ -116,10 +118,12 @@ try {
   const accessToken = process.env.JLSUBS_ACCESS_TOKEN;
   if (!accessToken) throw new Error('Set JLSUBS_ACCESS_TOKEN for the authenticated service');
   await call(ws, 'Page.addScriptToEvaluateOnNewDocument', {
-    source: `document.addEventListener('DOMContentLoaded', () => { document.getElementById('access-token').value = ${JSON.stringify(accessToken)}; });`,
+    source: `document.addEventListener('DOMContentLoaded', () => {
+      if (location.origin === ${JSON.stringify(PAGE_URL.origin)}) document.getElementById('access-token').value = ${JSON.stringify(accessToken)};
+    });`,
   }, sessionId);
   await call(ws, 'Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false }, sessionId);
-  await call(ws, 'Page.navigate', { url: PAGE_URL }, sessionId);
+  await call(ws, 'Page.navigate', { url: PAGE_URL.href }, sessionId);
   await sleep(1500);
 
   const seen = [];

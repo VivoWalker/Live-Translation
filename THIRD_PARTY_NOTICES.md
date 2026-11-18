@@ -28,7 +28,7 @@ WASM 与其绑定来自 sherpa-onnx 官方构建，不属于本项目原创代�
 | Community-1 | 可选录播说话人模型 | [pyannote 模型卡，CC BY 4.0 与权重获取条款](https://huggingface.co/pyannote/speaker-diarization-community-1) |
 | Silero VAD | 浏览器与 Python 的语音分段 | [MIT，Silero Team](LICENSES/Silero-VAD-MIT.txt) · [上游](https://github.com/snakers4/silero-vad) |
 
-SenseVoice **源码许可与模型权重许可不同**。不能把 sherpa-onnx 的 Apache-2.0 或本项目的 MIT 直接当作 SenseVoice 权重许可。这里记录的是 2026-11-17 核对到的上游声明；实际取得的具体模型副本仍以其随附条款及适用授权为准。
+SenseVoice **源码许可与模型权重许可不同**。2026-11-18 复核的模型卡分别标注 SenseVoice 权重为自定义条款、Parakeet 与 Community-1 为 CC BY 4.0、Qwen3-ASR 为 Apache-2.0、Turbo 参考转换为 MIT。Community-1 的权重需要按上游条款申请访问。使用具体模型版本时以其随附条款为准。扩展发布 ZIP 仅打包提交中的代码、运行时及许可文本，模型继续由用户按需取得。
 
 ## Python 与开发依赖
 

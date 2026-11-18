@@ -13,8 +13,10 @@ from .asr_domain import BUILTIN, MAX_BYTES, PACKS, DomainCorrector, EpisodeTerm,
 
 
 def _source(value):
-    if isinstance(value, str) and len(value) <= 300:
+    if (isinstance(value, str) and len(value) <= 300 and value == value.strip()
+            and not any(ord(char) < 32 or ord(char) == 127 for char in value)):
         url = urlsplit(value)
+        _ = url.port
         if url.scheme == "https" and url.hostname and not url.username and not url.password:
             return value
     raise ValueError("Episode records require an HTTPS source")
