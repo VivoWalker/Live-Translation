@@ -9,6 +9,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-2563eb.svg)](LICENSE)
 [![Chrome / Edge](https://img.shields.io/badge/Chrome%20%2F%20Edge-116%2B-334155.svg)](extension/manifest.json)
+[![CI](https://github.com/VivoWalker/Live-Translation/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/VivoWalker/Live-Translation/actions/workflows/ci.yml)
 
 [快速开始](#快速开始) · [本地服务](docs/local-service.md) · [专名词表](docs/asr-domain.md) · [Benchmark](docs/benchmark.md)
 

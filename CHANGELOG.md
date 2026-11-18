@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+- GitHub Actions 持续执行 Python、JavaScript 和轻量 Chromium 回归。通过检查的版本标签生成带 SHA-256 的扩展安装制品。
+
 - 浏览器与本地服务都按分段 ID 保留连续发言的翻译任务，支持有界并发和乱序回填。翻译快照在日语 final 产生时固定，队列满、超时和语言切换均有分段状态。
 - WebSocket 优先交付最终字幕、译文和错误。音频积压会降频预览或提示重新开始。Silero 可调整静音时长、强制切分及可选的边界重叠，默认保留原参数。
 - 可选本地模型新增 Parakeet 日语、Whisper Large V3 Turbo 和 Qwen3-ASR。服务报告模型能力和启动回退状态，最终识别优先于尚未开始的预览。
