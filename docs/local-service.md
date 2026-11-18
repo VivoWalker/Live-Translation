@@ -2,7 +2,7 @@
 
 [返回项目首页](../README.md)
 
-本地服务使用 Python、sherpa-onnx 与 ONNX Runtime 在 CPU 上识别日语，默认 SenseVoice，可切换实验性 Whisper。扩展选择「本地服务」后，将标签页音频发送到配置的 WebSocket 地址；默认服务只监听本机。
+本地服务默认使用 Python、sherpa-onnx 和 CPU SenseVoice。扩展选择本地服务模式后，将标签页音频发送到配置的 WebSocket 地址，服务默认只监听本机。
 
 ## 安装依赖
 
@@ -128,3 +128,20 @@ Whisper 的预览至少等待 2 秒语音，间隔至少 2 秒；解码慢时进
 ## 语音分段参数
 
 `--vad-min-silence`、`--vad-max-segment` 和 `--vad-overlap` 的单位均为秒，对应配置字段 `vad_min_silence`、`vad_max_segment`、`vad_overlap`。默认分别为 0.4、12、0。可在同一批音频上比较 0.4 / 0.6 / 0.8 秒停顿和 8 / 12 / 16 秒上限。重叠为可选实验，允许 0–0.3 秒，在强制切分后的下一段复用少量边界音频，移除双方一致的短前后缀。真实重复的台词可能受影响，使用默认配置可关闭此行为。
+
+## 可选识别后端
+
+使用官方模型或已核验来源的转换制品，将权重预先下载到本机目录。安装所选后端的依赖后再启动服务。下例仅说明配置，CUDA 需按上游说明安装对应的运行时。
+
+```sh
+python -m pip install -r requirements/parakeet.txt
+python -m server.app --asr parakeet --model-dir /path/to/parakeet.nemo --asr-device cpu
+
+python -m pip install -r requirements/whisper-turbo.txt
+python -m server.app --asr whisper-turbo --model-dir /path/to/ct2-turbo --asr-device cuda --asr-precision float16
+
+python -m pip install -r requirements/qwen3-asr.txt
+python -m server.app --asr qwen3-asr --model-dir /path/to/Qwen3-ASR-1.7B --asr-device cuda --asr-precision bfloat16
+```
+
+`--asr-fallback sensevoice` 默认在备用后端加载失败时尝试 CPU SenseVoice。识别模型目录可用 `--fallback-model-dir` 指定。设置 `--asr-fallback off` 后可严格测试某个后端。服务报告实际模型和回退来源。常规运行仅加载一套 ASR。模型与制品来源见 [模型对照](model-comparison.md)。

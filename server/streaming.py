@@ -15,7 +15,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .asr import SAMPLE_RATE, SileroVad, Recognizer
+from .asr import Capabilities, SAMPLE_RATE, SileroVad, Recognizer
+from .asr_router import DecodeScheduler
 from .text import normalize_ja, stable_prefix, trim_overlap
 from .translate import TranslationPipeline
 from .security import MAX_BUFFERED_BYTES, MAX_FRAME_BYTES
@@ -96,11 +97,15 @@ class StreamSession:
         translator: TranslationPipeline,
         on_event,
         config: SessionConfig | None = None,
+        *,
+        decoder: DecodeScheduler | None = None,
     ):
         self.asr = asr
         self.translator = translator.new_session() if isinstance(translator, TranslationPipeline) else translator
         self.on_event = on_event
         self.cfg = config or SessionConfig()
+        self.decoder = decoder or DecodeScheduler()
+        self.capabilities = getattr(asr, "capabilities", Capabilities())
         self.vad = SileroVad(min_silence=self.cfg.vad.min_silence)
         self._max_segment = round(self.cfg.vad.max_segment * SAMPLE_RATE)
         self._overlap = round(self.cfg.vad.overlap * SAMPLE_RATE)
@@ -224,10 +229,13 @@ class StreamSession:
         await self._maybe_preview(start + consumed)
 
     # ---------------------------------------------------------------- ASR/MT
-    async def _decode(self, audio: np.ndarray) -> str:
+    async def _decode(self, audio: np.ndarray, *, partial: bool = False) -> str:
         t0 = time.perf_counter()
         try:
-            text = await asyncio.to_thread(self.asr.transcribe, audio)
+            text = await self.decoder.run(self.asr.transcribe, audio, optional=partial)
+            if text is None:
+                self.stats.preview_backlog_skips += 1
+                return ""
         except Exception:
             self.stats.decode_failures += 1
             self._emit({"type": "error", "scope": "asr", "code": "asr_decode_failed",
@@ -319,7 +327,7 @@ class StreamSession:
         audio = self._slice(start, end)
         if len(audio) < SAMPLE_RATE * self.asr.min_partial_speech:
             return
-        text = await self._decode(audio)
+        text = await self._decode(audio, partial=True)
         if not text:
             return
         stable = stable_prefix(self._last_hyp, text) if self._last_hyp else text
@@ -398,7 +406,7 @@ class StreamSession:
             await self._maybe_preview(end)
 
     async def _maybe_preview(self, end: int) -> None:
-        if not self._speech or end <= self._last_partial_total:
+        if not self.capabilities.partial_transcription or not self._speech or end <= self._last_partial_total:
             return
         now = time.monotonic()
         if ((end - self._seg_start) / SAMPLE_RATE < self.asr.min_partial_speech

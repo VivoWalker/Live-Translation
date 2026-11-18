@@ -25,6 +25,7 @@ import os
 import secrets
 import sys
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -33,7 +34,8 @@ from aiohttp import ClientConnectionError, WSMsgType, web
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from server.asr import Recognizer, create_recognizer  # noqa: E402
+from server.asr import BackendUnavailable, Capabilities, PROVIDERS, Recognizer  # noqa: E402
+from server.asr_router import DecodeScheduler, select_recognizer  # noqa: E402
 from server.asr_domain import PACKS, PROFILES, normalize_packs  # noqa: E402
 from server.streaming import AudioBacklogError, SessionConfig, StreamSession, VadSettings  # noqa: E402
 from server.translate import TranslationPipeline, create_translator  # noqa: E402
@@ -50,10 +52,14 @@ class AppState:
     def __init__(
         self, asr: Recognizer, translator: TranslationPipeline, *,
         access_token: str | None = None, allowed_hosts: set[str] | None = None, vad: VadSettings = VadSettings(),
+        fallback_from: str | None = None,
     ):
         self.asr = asr
         self.translator = translator
         self.vad = vad
+        self.decoder = DecodeScheduler()
+        self.fallback_from = fallback_from
+        self.capabilities = asdict(getattr(asr, "capabilities", Capabilities()))
         self.access_token = access_token or secrets.token_urlsafe(32)
         if len(self.access_token) < 32 or not self.access_token.isascii():
             raise ValueError("Access token must contain at least 32 ASCII characters")
@@ -127,7 +133,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 
         cfg = SessionConfig(vad=state.vad)
         try:
-            session = StreamSession(state.asr, state.translator, out.put, cfg)
+            session = StreamSession(state.asr, state.translator, out.put, cfg, decoder=state.decoder)
         except (OSError, RuntimeError):
             await ws.close(code=1011, message=b"VAD unavailable; verify local model")
             return ws
@@ -145,7 +151,8 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 code, reason = out.failure
                 await ws.close(code=code, message=reason, drain=False)
 
-        await ws.send_json({"type": "ready", "asr": state.asr.name, "translator": state.engine, "source": "ja", "target": "zh"})
+        await ws.send_json({"type": "ready", "asr": state.asr.name, "translator": state.engine, "source": "ja", "target": "zh",
+                            "asr_capabilities": state.capabilities, "asr_fallback_from": state.fallback_from})
         writer_task = asyncio.create_task(writer())
         audio_budget = RateBudget(128000, 256000)  # Up to 2x realtime, four-second burst.
         control_budget = RateBudget(20, 40)
@@ -213,6 +220,8 @@ async def health(request: web.Request) -> web.Response:
         {
             "ok": True,
             "asr": state.asr.name,
+            "asr_capabilities": state.capabilities,
+            "asr_fallback_from": state.fallback_from,
             "translator": state.engine,
             "sessions": state.sessions,
             "uptime_s": round(time.time() - state.started, 1),
@@ -292,9 +301,13 @@ def main() -> int:
     ap.add_argument("--vad-min-silence", type=float, default=cfg.get("vad_min_silence", .4))
     ap.add_argument("--vad-max-segment", type=float, default=cfg.get("vad_max_segment", 12))
     ap.add_argument("--vad-overlap", type=float, default=cfg.get("vad_overlap", 0))
-    ap.add_argument("--asr", choices=("sensevoice", "whisper"),
+    ap.add_argument("--asr", choices=PROVIDERS,
                     default=os.environ.get("JLSUBS_ASR", cfg.get("asr", "sensevoice")),
                     help="Local recognition backend (default: sensevoice)")
+    ap.add_argument("--asr-device", choices=("cpu", "cuda"), default=cfg.get("asr_device", "cpu"))
+    ap.add_argument("--asr-precision", default=cfg.get("asr_precision"))
+    ap.add_argument("--asr-fallback", choices=("sensevoice", "off"), default=cfg.get("asr_fallback", "sensevoice"))
+    ap.add_argument("--fallback-model-dir", default=cfg.get("fallback_model_dir"))
     lexicon = ap.add_mutually_exclusive_group()
     lexicon.add_argument("--asr-packs", choices=PACKS, nargs="*", help="Enable named ASR word packs; no names disables all packs")
     lexicon.add_argument("--asr-domain", choices=PROFILES, help="Legacy ASR lexicon profile")
@@ -311,15 +324,19 @@ def main() -> int:
     api_key = os.environ.get("DEEPSEEK_API_KEY") or cfg.get("deepseek_api_key")
     try:
         vad = VadSettings(args.vad_min_silence, args.vad_max_segment, args.vad_overlap)
-        asr = create_recognizer(args.asr, model_dir=args.model_dir, language="ja", num_threads=args.threads,
-                                asr_domain=selection, asr_terms=args.asr_terms)
-    except (OSError, ValueError) as exc:
+        asr, fallback_from = select_recognizer(args.asr, model_dir=args.model_dir, language="ja",
+                                               num_threads=args.threads, asr_domain=selection, asr_terms=args.asr_terms,
+                                               device=args.asr_device, precision=args.asr_precision,
+                                               fallback_dir=args.fallback_model_dir, allow_fallback=args.asr_fallback != "off")
+    except (OSError, ValueError, BackendUnavailable) as exc:
         ap.error(str(exc))
     translator = TranslationPipeline(create_translator(args.translator, api_key))
     state = AppState(asr, translator, access_token=os.environ.get("JLSUBS_ACCESS_TOKEN") or cfg.get("access_token"),
-                     allowed_hosts=LOCAL_HOSTS | set(args.allow_host), vad=vad)
+                     allowed_hosts=LOCAL_HOSTS | set(args.allow_host), vad=vad, fallback_from=fallback_from)
     active_packs = ("custom" if selection != "off" else "off") if args.asr_terms else ",".join(normalize_packs(selection)) or "off"
     print(f"[jls] asr={asr.name} threads={args.threads} asr_packs={active_packs} translator={translator.engine}")
+    if fallback_from:
+        print(f"[jls] 无法加载 {fallback_from}，已切换到 {asr.name}")
     if translator.engine == "deepseek":
         print(f"[jls] deepseek model={os.environ.get('DEEPSEEK_MODEL', 'deepseek-chat')}")
     elif translator.engine == "google-public":

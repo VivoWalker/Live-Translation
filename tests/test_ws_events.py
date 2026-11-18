@@ -29,7 +29,7 @@ class OutputTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_real_socket_signals_overflow_and_a_new_session_recovers(self):
         class BurstSession:
-            def __init__(self, asr, translator, on_event, config):
+            def __init__(self, asr, translator, on_event, config, **kwargs):
                 self.emit = on_event
                 self.stats = Stats()
 
